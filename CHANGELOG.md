@@ -1,3 +1,9 @@
+## [1.0.3](https://github.com/sonnam0904/sqleditor/compare/v1.0.2...v1.0.3) (2026-06-11)
+
+### Bug Fixes
+
+* add dependency installation in workflows (rebuild) ([9187f23](https://github.com/sonnam0904/sqleditor/commit/9187f230e8ec1267048f03f73d99644a61619334))
+
 ## [1.0.2](https://github.com/sonnam0904/sqleditor/compare/v1.0.1...v1.0.2) (2026-06-11)
 
 ### Bug Fixes
