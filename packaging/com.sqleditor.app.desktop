@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=SQLEditor
+Comment=SQL Database Client
+Exec=SQLEditor
+Icon=com.sqleditor.app
+Terminal=false
+Type=Application
+StartupWMClass=com.sqleditor.app
+Categories=Development;Database;IDE;
+Keywords=sql;database;sqlite;postgresql;mysql;redis;mongodb;

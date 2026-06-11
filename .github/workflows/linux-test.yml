@@ -1,0 +1,84 @@
+name: Linux Tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # x-gha shares vcpkg binary cache with the Build Linux workflow
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Export GitHub Actions cache env
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config \
+            libgtk-4-dev libepoxy-dev libx11-dev \
+            libtirpc-dev libltdl-dev python3-venv \
+            autoconf automake autoconf-archive \
+            freetds-dev libgnutls28-dev libkrb5-dev \
+            openssl
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: "77df67cfff9c12ccfdb52284e07c87c75092f723"
+
+      # Test build dir differs from release (build vs build_release), so this
+      # cache is keyed separately. The shared win is x-gha vcpkg binary cache.
+      - name: Cache vcpkg installed packages (test)
+        uses: actions/cache@v4
+        with:
+          path: build/vcpkg_installed
+          key: vcpkg-installed-linux-test-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-installed-linux-test-
+            vcpkg-installed-linux-
+
+      - name: Inject secrets into APP_METADATA
+        run: |
+          echo "SENTRY_DSN=${{ secrets.SENTRY_DSN }}" >> APP_METADATA
+          echo "POLAR_ORGANIZATION_ID=${{ secrets.POLAR_ORGANIZATION_ID }}" >> APP_METADATA
+          echo "CREDS_SECRET=${{ secrets.CREDS_SECRET }}" >> APP_METADATA
+
+      - name: Run tests
+        env:
+          CMAKE_GENERATOR: Ninja
+          # ensure each test prints [ RUN ] / [ OK ] lines unbuffered so a
+          # hang shows the last-running test in the GitHub Actions log
+          GTEST_COLOR: "no"
+          GTEST_PRINT_TIME: "1"
+        run: |
+          # 30-min wall-clock cap per test binary so a single hung test
+          # cannot silently consume the whole job timeout
+          stdbuf -oL -eL timeout --foreground 30m ./scripts/run-tests
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          for c in sqleditor-postgres-test sqleditor-mysql-test sqleditor-redis-test \
+                   sqleditor-mongodb-test sqleditor-mssql-test sqleditor-oracle-test \
+                   sqleditor-redshift-test sqleditor-cassandra-test sqleditor-ssh-test; do
+            echo "===== $c ====="
+            docker logs --tail=200 "$c" 2>&1 || true
+          done

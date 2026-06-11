@@ -1,0 +1,803 @@
+#include "ui/db_sidebar.hpp"
+#include "IconsFontAwesome6.h"
+#include "application.hpp"
+#include "database/cassandra.hpp"
+#include "database/db_interface.hpp"
+#include "database/mongodb.hpp"
+#include "database/mssql.hpp"
+#include "database/mysql.hpp"
+#include "database/oracle.hpp"
+#include "database/oracle/oracle_client_installer.hpp"
+#include "database/postgresql.hpp"
+#include "database/redis.hpp"
+#include "database/sqlite.hpp"
+#include "imgui.h"
+#include "platform/alert.hpp"
+#include "platform/connection_dialog.hpp"
+#include "ui/database_node.hpp"
+#include "ui/input_dialog.hpp"
+#include "ui/query_history.hpp"
+#include "utils/file_dialog.hpp"
+#include "utils/spinner.hpp"
+#include "utils/texture_manager.hpp"
+#include <algorithm>
+#include <chrono>
+#include <format>
+#include <memory>
+#include <ranges>
+#include <spdlog/spdlog.h>
+
+DatabaseHierarchy* DatabaseSidebarNew::getHierarchy(const std::shared_ptr<DatabaseInterface>& db) {
+    if (!db) {
+        return nullptr;
+    }
+
+    auto it = hierarchyCache.find(db.get());
+    if (it != hierarchyCache.end()) {
+        return it->second.get();
+    }
+
+    // Create new hierarchy if not found (shouldn't happen if syncHierarchyCache is called)
+    auto [inserted, success] =
+        hierarchyCache.emplace(db.get(), std::make_unique<DatabaseHierarchy>(db));
+    return inserted->second.get();
+}
+
+void DatabaseSidebarNew::showConnectionDialog() {
+    auto& app = Application::getInstance();
+    if (!app.canAddConnection()) {
+        Alert::show("Connection Limit Reached",
+                    "Free tier is limited to 3 connections. Activate a license to add more.");
+        return;
+    }
+    ::showConnectionDialog(&app);
+}
+
+void DatabaseSidebarNew::renderEmpty() {
+    const auto& app = Application::getInstance();
+    const auto& colors = app.getCurrentColors();
+    ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+    ImGui::TextWrapped("No databases connected");
+    ImGui::Spacing();
+    ImGui::TextWrapped("Right-click here to add a new database connection");
+    ImGui::PopStyleColor();
+
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        ImGui::OpenPopup("AddDatabasePopup");
+    }
+
+    if (ImGui::BeginPopup("AddDatabasePopup")) {
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                            ImVec2(Theme::Spacing::M, Theme::Spacing::M));
+        if (ImGui::MenuItem("Add Database Connection")) {
+            spdlog::debug("Opening database connection dialog");
+            showConnectionDialog();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_FA_FILE_CSV " Open CSV File...")) {
+            const std::string path = FileDialog::openCSVFile();
+            if (!path.empty()) {
+                Application::getInstance().getTabManager()->createCsvEditorTab(path);
+            }
+        }
+        ImGui::PopStyleVar();
+        ImGui::EndPopup();
+    }
+}
+
+void DatabaseSidebarNew::syncHierarchyCache(
+    const std::vector<std::shared_ptr<DatabaseInterface>>& databases) {
+    std::erase_if(hierarchyCache, [&](const auto& entry) {
+        return std::ranges::none_of(databases,
+                                    [&](const auto& db) { return db.get() == entry.first; });
+    });
+}
+
+void DatabaseSidebarNew::renderStructure() {
+    auto& app = Application::getInstance();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 2.0f));
+    const auto& databases = app.getDatabases();
+
+    syncHierarchyCache(databases);
+
+    if (!databases.empty()) {
+        // copy shared_ptrs so a removal during rendering doesn't invalidate the iterator
+        const auto snapshot = databases;
+        for (const auto& db : snapshot) {
+            renderDatabaseNode(db);
+        }
+    } else {
+        renderEmpty();
+    }
+
+    // right-click on empty sidebar space
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsAnyItemHovered()) {
+        ImGui::OpenPopup("SidebarContextMenu");
+    }
+    if (ImGui::BeginPopup("SidebarContextMenu")) {
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                            ImVec2(Theme::Spacing::M, Theme::Spacing::M));
+        if (ImGui::MenuItem("Add Database Connection")) {
+            showConnectionDialog();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_FA_FILE_CSV " Open CSV File...")) {
+            const std::string path = FileDialog::openCSVFile();
+            if (!path.empty()) {
+                Application::getInstance().getTabManager()->createCsvEditorTab(path);
+            }
+        }
+        ImGui::PopStyleVar();
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopStyleVar(2);
+}
+
+void DatabaseSidebarNew::renderHistory() {
+    auto& app = Application::getInstance();
+    const auto& colors = app.getCurrentColors();
+    auto& history = QueryHistory::instance();
+
+    const auto& entries = history.getEntries();
+    if (entries.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+        ImGui::TextWrapped("No queries executed yet");
+        ImGui::PopStyleColor();
+        return;
+    }
+
+    // Calculate relative time
+    auto formatRelativeTime = [](const std::chrono::system_clock::time_point& tp) -> std::string {
+        const auto now = std::chrono::system_clock::now();
+        const auto diff = std::chrono::duration_cast<std::chrono::seconds>(now - tp).count();
+
+        if (diff < 60) {
+            return "just now";
+        }
+        if (diff < 3600) {
+            int mins = static_cast<int>(diff / 60);
+            return std::format("{}m ago", mins);
+        }
+        if (diff < 86400) {
+            int hours = static_cast<int>(diff / 3600);
+            return std::format("{}h ago", hours);
+        }
+        int days = static_cast<int>(diff / 86400);
+        return std::format("{}d ago", days);
+    };
+
+    auto getQueryTypeInfo = [&colors](QueryType type) -> std::pair<std::string, ImVec4> {
+        switch (type) {
+        case QueryType::Select:
+            return {"SELECT", colors.blue};
+        case QueryType::Insert:
+            return {"INSERT", colors.green};
+        case QueryType::Update:
+            return {"UPDATE", colors.peach};
+        case QueryType::Delete:
+            return {"DELETE", colors.red};
+        case QueryType::Create:
+            return {"CREATE", colors.purple};
+        case QueryType::Alter:
+            return {"ALTER", colors.yellow};
+        case QueryType::Drop:
+            return {"DROP", colors.maroon};
+        default:
+            return {"OTHER", colors.overlay1};
+        }
+    };
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(Theme::Spacing::S, Theme::Spacing::S));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const auto& entry = entries[i];
+        const auto [typeLabel, typeColor] = getQueryTypeInfo(entry.type);
+
+        ImGui::PushID(static_cast<int>(i));
+
+        ImGui::PushStyleColor(ImGuiCol_Button, typeColor);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, typeColor);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, typeColor);
+        ImGui::PushStyleColor(ImGuiCol_Text, colors.base);
+        ImGui::SmallButton(typeLabel.c_str());
+        ImGui::PopStyleColor(4);
+
+        ImGui::SameLine();
+
+        const float availWidth = ImGui::GetContentRegionAvail().x - 30.0f;
+        std::string displayQuery = entry.query;
+        if (displayQuery.length() > 30) {
+            displayQuery = displayQuery.substr(0, 27) + "...";
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, colors.text);
+        if (ImGui::Selectable(displayQuery.c_str(), false, 0, ImVec2(availWidth, 0))) {
+            // TODO: Could copy to clipboard or open in SQL editor
+        }
+        ImGui::PopStyleColor();
+
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(400.0f);
+            ImGui::TextUnformatted(entry.query.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+
+        if (ImGui::BeginPopupContextItem("history_entry_menu")) {
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                                ImVec2(Theme::Spacing::M, Theme::Spacing::M));
+            if (ImGui::MenuItem("Copy to clipboard")) {
+                ImGui::SetClipboardText(entry.query.c_str());
+            }
+            ImGui::PopStyleVar();
+            ImGui::EndPopup();
+        }
+
+        ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+        std::string metaInfo = formatRelativeTime(entry.timestamp);
+        if (entry.rowCount > 0) {
+            metaInfo += std::format(" {} rows", entry.rowCount);
+        }
+        if (entry.durationMs > 0) {
+            metaInfo += std::format(" {}ms", entry.durationMs);
+        }
+        ImGui::Text("%s %s", ICON_FA_CLOCK, metaInfo.c_str());
+        ImGui::PopStyleColor();
+
+        ImGui::PopID();
+    }
+
+    ImGui::PopStyleVar(2);
+}
+
+float DatabaseSidebarNew::getHistoryButtonHeight() const {
+    constexpr float historyButtonPadding = 6.0f;
+    const ImVec2 historyLabelSize = ImGui::CalcTextSize("History");
+    return historyLabelSize.x + historyButtonPadding * 2.0f;
+}
+
+void DatabaseSidebarNew::renderHistoryToggleButton(const ImVec2& btnMin, float buttonW,
+                                                   float buttonH, bool drawRightBorder) {
+    auto& app = Application::getInstance();
+    const auto& colors = app.getCurrentColors();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    const ImVec2 btnMax(btnMin.x + buttonW, btnMin.y + buttonH);
+
+    ImGui::SetCursorScreenPos(btnMin);
+    ImGui::InvisibleButton("##toggle_history", ImVec2(buttonW, buttonH));
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemClicked()) {
+        historyPanelOpen = !historyPanelOpen;
+    }
+
+    if (hovered) {
+        drawList->AddRectFilled(btnMin, btnMax, ImGui::GetColorU32(colors.surface1));
+    }
+
+    drawList->AddLine(btnMin, ImVec2(btnMax.x, btnMin.y), ImGui::GetColorU32(colors.overlay0),
+                      1.0f);
+    if (drawRightBorder) {
+        drawList->AddLine(ImVec2(btnMax.x, btnMin.y), btnMax, ImGui::GetColorU32(colors.overlay0),
+                          1.0f);
+    }
+
+    const char* label = "History";
+    const ImVec2 textSize = ImGui::CalcTextSize(label);
+    const float cx = btnMin.x + buttonW * 0.5f;
+    const float cy = btnMin.y + buttonH * 0.5f;
+    const float textX = cx - textSize.x * 0.5f;
+    const float textY = cy - textSize.y * 0.5f;
+
+    drawList->PushClipRectFullScreen();
+    const int vtxBegin = drawList->VtxBuffer.Size;
+    drawList->AddText(ImVec2(textX, textY),
+                      ImGui::GetColorU32(hovered ? colors.text : colors.subtext0), label);
+    const int vtxEnd = drawList->VtxBuffer.Size;
+
+    for (int i = vtxBegin; i < vtxEnd; i++) {
+        ImDrawVert& v = drawList->VtxBuffer[i];
+        const float dx = v.pos.x - cx;
+        const float dy = v.pos.y - cy;
+        v.pos.x = cx + dy;
+        v.pos.y = cy - dx;
+    }
+    drawList->PopClipRect();
+}
+
+void DatabaseSidebarNew::render() {
+    auto& app = Application::getInstance();
+    const auto& colors = app.getCurrentColors();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 0.0f);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Theme::Spacing::M, 0.0f));
+    ImGui::Begin("Databases", nullptr, ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar();
+
+    ImGui::PushStyleColor(ImGuiCol_Header,
+                          ImVec4(colors.surface1.x, colors.surface1.y, colors.surface1.z, 0.6f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered,
+                          ImVec4(colors.surface1.x, colors.surface1.y, colors.surface1.z, 0.8f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive,
+                          ImVec4(colors.blue.x, colors.blue.y, colors.blue.z, 0.3f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, colors.surface0);
+
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 8.0f);
+
+    const float availableHeight = ImGui::GetContentRegionAvail().y;
+    // extend past parent's right WindowPadding so scrollbar sits flush on the right
+    const float sidebarWidth = ImGui::GetContentRegionAvail().x + Theme::Spacing::M;
+    constexpr float historyHeight = 300.0f;
+    constexpr float stripWidth = 22.0f;
+    const float historyButtonH = getHistoryButtonHeight();
+
+    const float structureSectionHeight =
+        historyPanelOpen ? availableHeight - historyHeight - ImGui::GetStyle().ItemSpacing.y
+                         : availableHeight - historyButtonH;
+
+    {
+        const bool structureHovered = ImGui::IsMouseHoveringRect(
+            ImGui::GetCursorScreenPos(),
+            ImVec2(ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x,
+                   ImGui::GetCursorScreenPos().y + structureSectionHeight));
+        // gutter reserved only when scrollable; hide visuals when not hovered
+        if (!structureHovered) {
+            ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0, 0, 0, 0));
+        }
+        ImGui::BeginChild("StructureSection", ImVec2(sidebarWidth, structureSectionHeight), false,
+                          0);
+        renderStructure();
+        ImGui::EndChild();
+        if (!structureHovered) {
+            ImGui::PopStyleColor(4);
+        }
+    }
+
+    if (historyPanelOpen) {
+        const float bottomHeight = ImGui::GetContentRegionAvail().y;
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        if (ImGui::BeginChild("HistoryToggleStrip", ImVec2(stripWidth, bottomHeight),
+                              ImGuiChildFlags_None)) {
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            const ImVec2 stripPos = ImGui::GetCursorScreenPos();
+
+            drawList->AddLine(ImVec2(stripPos.x + stripWidth, stripPos.y),
+                              ImVec2(stripPos.x + stripWidth, stripPos.y + bottomHeight),
+                              ImGui::GetColorU32(colors.overlay0), 1.0f);
+            drawList->AddLine(stripPos, ImVec2(stripPos.x + stripWidth, stripPos.y),
+                              ImGui::GetColorU32(colors.overlay0), 1.0f);
+
+            constexpr float buttonW = stripWidth;
+            const float buttonH = historyButtonH;
+            const float buttonY = stripPos.y + bottomHeight - buttonH;
+            const ImVec2 btnMin(stripPos.x, buttonY);
+            renderHistoryToggleButton(btnMin, buttonW, buttonH, false);
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine(0, 0);
+
+        const float contentWidth = sidebarWidth - stripWidth;
+        ImGui::BeginChild("HistoryContent", ImVec2(contentWidth, bottomHeight), false,
+                          ImGuiWindowFlags_NoScrollbar);
+        {
+            ImDrawList* historyDrawList = ImGui::GetWindowDrawList();
+            const ImVec2 historyPanelPos = ImGui::GetWindowPos();
+            const ImVec2 historyPanelSize = ImGui::GetWindowSize();
+            historyDrawList->AddLine(
+                historyPanelPos, ImVec2(historyPanelPos.x + historyPanelSize.x, historyPanelPos.y),
+                ImGui::GetColorU32(colors.overlay0), 1.0f);
+
+            auto& history = QueryHistory::instance();
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+            ImGui::TextUnformatted("HISTORY");
+            ImGui::PopStyleColor();
+
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 16.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(
+                ImGuiCol_ButtonHovered,
+                ImVec4(colors.surface1.x, colors.surface1.y, colors.surface1.z, 0.5f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, colors.surface2);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                                ImVec2(Theme::Spacing::XS, Theme::Spacing::XS));
+            if (ImGui::Button(ICON_FA_TRASH_CAN "##clear_history")) {
+                history.clear();
+            }
+            ImGui::PopStyleVar();
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Clear history");
+            }
+            ImGui::PopStyleColor(3);
+            ImGui::Spacing();
+
+            const ImVec2 historyCursorPos = ImGui::GetCursorScreenPos();
+            const bool historyHovered = ImGui::IsMouseHoveringRect(
+                historyCursorPos, ImVec2(historyCursorPos.x + ImGui::GetContentRegionAvail().x,
+                                         historyCursorPos.y + ImGui::GetContentRegionAvail().y));
+            if (!historyHovered) {
+                ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0, 0, 0, 0));
+            }
+            ImGui::BeginChild("HistoryList", ImVec2(0, 0), false, 0);
+            renderHistory();
+            ImGui::EndChild();
+            if (!historyHovered) {
+                ImGui::PopStyleColor(4);
+            }
+        }
+        ImGui::EndChild();
+    } else {
+        // When closed, draw the toggle button using absolute positioning at the bottom-left
+        // via the parent window's draw list (no child window needed)
+        const ImVec2 windowPos = ImGui::GetWindowPos();
+        const ImVec2 contentMin(windowPos.x + ImGui::GetWindowContentRegionMin().x,
+                                windowPos.y + ImGui::GetWindowContentRegionMin().y);
+        const ImVec2 contentMax(windowPos.x + ImGui::GetWindowContentRegionMax().x,
+                                windowPos.y + ImGui::GetWindowContentRegionMax().y);
+
+        constexpr float buttonW = stripWidth;
+        const float buttonH = historyButtonH;
+
+        const ImVec2 btnMin(contentMin.x, contentMax.y - buttonH);
+        renderHistoryToggleButton(btnMin, buttonW, buttonH, true);
+    }
+
+    ImGui::PopStyleColor(4);
+    ImGui::End();
+
+    ImGui::PopStyleVar(); // PopupRounding
+}
+
+void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterface>& db) {
+    if (!db) {
+        return;
+    }
+
+    auto const connectionInfo = db->getConnectionInfo();
+    auto const type = connectionInfo.type;
+    auto& app = Application::getInstance();
+    const auto& colors = app.getCurrentColors();
+
+    ImGuiTreeNodeFlags dbFlags = ImGuiTreeNodeFlags_OpenOnArrow |
+                                 ImGuiTreeNodeFlags_OpenOnDoubleClick |
+                                 ImGuiTreeNodeFlags_FramePadding;
+    if (const auto selected = app.getSelectedDatabase(); selected && selected == db) {
+        dbFlags |= ImGuiTreeNodeFlags_Selected;
+    }
+
+    const bool showSpinner = db->isConnecting();
+
+    auto& texMgr = TextureManager::instance();
+    if (!texturesLoaded_) {
+        texMgr.loadDatabaseIcons(app.getPlatform());
+        texturesLoaded_ = true;
+    }
+
+    const std::string dbLabel =
+        std::format("   {}###db_{:p}", connectionInfo.name, static_cast<const void*>(db.get()));
+    const bool dbOpen = ImGui::TreeNodeEx(dbLabel.c_str(), dbFlags);
+    const ImVec2 nodeMin = ImGui::GetItemRectMin();
+    const ImVec2 nodeMax = ImGui::GetItemRectMax();
+
+    const float iconSize = texMgr.getIconSize();
+    const auto dbIconPos = ImVec2(nodeMin.x + ImGui::GetTreeNodeToLabelSpacing(),
+                                  nodeMin.y + ((nodeMax.y - nodeMin.y) - iconSize) * 0.5f);
+
+    if (showSpinner) {
+        const ImVec2 centre(dbIconPos.x + iconSize * 0.5f, dbIconPos.y + iconSize * 0.5f);
+        UIUtils::SpinnerOverlay(ImGui::GetWindowDrawList(), centre, 6.0f, 2,
+                                ImGui::GetColorU32(colors.peach));
+    } else {
+        ImTextureID iconTex = texMgr.getIcon(type);
+        const ImVec2 iconMax = ImVec2(dbIconPos.x + iconSize, dbIconPos.y + iconSize);
+        ImGui::GetWindowDrawList()->AddImage(iconTex, dbIconPos, iconMax);
+    }
+
+    if (ImGui::IsItemClicked()) {
+        app.setSelectedDatabase(db);
+    }
+
+    ImGui::PushID(db.get());
+    handleDatabaseContextMenu(db);
+    ImGui::PopID();
+
+    db->checkConnectionStatusAsync();
+
+    auto tryRefresh = [&]<typename T>() {
+        if (auto* d = dynamic_cast<T*>(db.get()))
+            d->checkRefreshWorkflowAsync();
+    };
+
+    switch (type) {
+    case DatabaseType::POSTGRESQL:
+    case DatabaseType::REDSHIFT:
+        tryRefresh.template operator()<PostgresDatabase>();
+        break;
+    case DatabaseType::MYSQL:
+    case DatabaseType::MARIADB:
+        tryRefresh.template operator()<MySQLDatabase>();
+        break;
+    case DatabaseType::MONGODB:
+        tryRefresh.template operator()<MongoDBDatabase>();
+        break;
+    case DatabaseType::MSSQL:
+        tryRefresh.template operator()<MSSQLDatabase>();
+        break;
+    case DatabaseType::ORACLE:
+        tryRefresh.template operator()<OracleDatabase>();
+        break;
+    case DatabaseType::REDIS:
+        tryRefresh.template operator()<RedisDatabase>();
+        break;
+    case DatabaseType::CASSANDRA:
+        tryRefresh.template operator()<CassandraDatabase>();
+        break;
+    default:
+        break;
+    }
+
+    if (db->isConnected() && type != DatabaseType::SQLITE) {
+        std::vector<std::string> dbNames;
+
+        auto collectNames = [&]<typename T>() {
+            if (auto* d = dynamic_cast<T*>(db.get()))
+                for (const auto& name : d->getDatabaseDataMap() | std::views::keys)
+                    dbNames.push_back(name);
+        };
+
+        switch (type) {
+        case DatabaseType::POSTGRESQL:
+        case DatabaseType::REDSHIFT:
+            collectNames.template operator()<PostgresDatabase>();
+            break;
+        case DatabaseType::MYSQL:
+        case DatabaseType::MARIADB:
+            collectNames.template operator()<MySQLDatabase>();
+            break;
+        case DatabaseType::MSSQL:
+            collectNames.template operator()<MSSQLDatabase>();
+            break;
+        case DatabaseType::ORACLE:
+            collectNames.template operator()<OracleDatabase>();
+            break;
+        case DatabaseType::MONGODB:
+            collectNames.template operator()<MongoDBDatabase>();
+            break;
+        case DatabaseType::REDIS:
+            if (auto* redisDb = dynamic_cast<RedisDatabase*>(db.get()))
+                for (const auto& info : redisDb->getDatabaseInfoList())
+                    dbNames.push_back(std::format("db{}", info.index));
+            break;
+        case DatabaseType::CASSANDRA:
+            collectNames.template operator()<CassandraDatabase>();
+            break;
+        default:
+            break;
+        }
+
+        if (!dbNames.empty()) {
+            auto* hierarchy = getHierarchy(db);
+            const int total = static_cast<int>(dbNames.size());
+            int hiddenCount = 0;
+            for (const auto& name : dbNames) {
+                if (hierarchy && hierarchy->isDatabaseHidden(name))
+                    hiddenCount++;
+            }
+            const int visibleCount = total - hiddenCount;
+
+            const std::string countStr =
+                hiddenCount > 0 ? std::format("{}/{}", visibleCount, total) : std::to_string(total);
+            const ImVec4& badgeColor = hiddenCount > 0 ? colors.peach : colors.overlay1;
+
+            const float textW = ImGui::CalcTextSize(countStr.c_str()).x;
+            constexpr float hPad = 4.0f;
+            const float btnW = textW + hPad * 2.0f;
+            const float rowH = nodeMax.y - nodeMin.y;
+            const float rightEdge = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+            const float btnX = rightEdge - btnW - hPad;
+
+            // draw badge text
+            const ImVec2 textPos(btnX + hPad,
+                                 nodeMin.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f);
+            ImGui::GetWindowDrawList()->AddText(textPos, ImGui::GetColorU32(badgeColor),
+                                                countStr.c_str());
+
+            const std::string popupId =
+                std::format("##filter_popup_{:p}", static_cast<const void*>(db.get()));
+            const ImVec2 badgeMin(btnX, nodeMin.y);
+            const ImVec2 badgeMax(btnX + btnW, nodeMax.y);
+            const bool badgeHovered = ImGui::IsMouseHoveringRect(badgeMin, badgeMax);
+
+            if (badgeHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                ImGui::OpenPopup(popupId.c_str());
+            }
+
+            if (badgeHovered) {
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    badgeMin, badgeMax, ImGui::GetColorU32(colors.surface1), 3.0f);
+                ImGui::GetWindowDrawList()->AddText(textPos, ImGui::GetColorU32(badgeColor),
+                                                    countStr.c_str());
+            }
+
+            if (ImGui::BeginPopup(popupId.c_str())) {
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                                    ImVec2(Theme::Spacing::M, Theme::Spacing::M));
+                std::sort(dbNames.begin(), dbNames.end());
+                for (const auto& name : dbNames) {
+                    bool visible = !(hierarchy && hierarchy->isDatabaseHidden(name));
+                    if (ImGui::Checkbox(name.c_str(), &visible)) {
+                        if (hierarchy)
+                            hierarchy->setDatabaseHidden(name, !visible);
+                    }
+                }
+                ImGui::PopStyleVar();
+                ImGui::EndPopup();
+            }
+        }
+    }
+
+    if (dbOpen) {
+        if (!db->isConnected() && !db->hasAttemptedConnection() && !db->isConnecting()) {
+            spdlog::debug("Starting connection to database: {}", connectionInfo.name);
+            db->startConnectionAsync();
+        }
+
+        if (db->isConnecting()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
+            ImGui::Text("  Connecting...");
+            ImGui::SameLine(0, Theme::Spacing::S);
+            UIUtils::Spinner("##connecting_spinner", 6.0f, 2, ImGui::GetColorU32(colors.peach));
+            ImGui::PopStyleColor();
+        } else if (!db->isConnected() && !db->hasAttemptedConnection()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
+            ImGui::Text("  Click to connect");
+            ImGui::PopStyleColor();
+        } else if (db->hasAttemptedConnection() && !db->isConnected() &&
+                   !db->getLastConnectionError().empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, colors.red);
+            ImGui::TextWrapped("  Connection failed: %s", db->getLastConnectionError().c_str());
+            ImGui::PopStyleColor();
+
+            if (connectionInfo.type == DatabaseType::ORACLE &&
+                OracleDatabase::needsClientInstall()) {
+                oracleClientInstaller_.checkStatus();
+
+                if (oracleClientInstaller_.isRunning()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
+                    ImGui::Text("  %s", oracleClientInstaller_.getStatusMessage().c_str());
+                    ImGui::SameLine(0, Theme::Spacing::S);
+                    UIUtils::Spinner("##oracle_install_spinner", 6.0f, 2,
+                                     ImGui::GetColorU32(colors.peach));
+                    ImGui::PopStyleColor();
+                } else if (oracleClientInstaller_.getStatus() ==
+                           OracleClientInstaller::Status::Done) {
+                    OracleDatabase::reinitContext();
+                    db->startConnectionAsync();
+                } else {
+                    ImGui::Indent(Theme::Spacing::M);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Downloads Oracle Instant Client Basic Lite (~30MB) to ~/.sqleditor/");
+                    }
+                    ImGui::Unindent(Theme::Spacing::M);
+                }
+            }
+        } else if (db->isConnected()) {
+            if (auto* hierarchy = getHierarchy(db)) {
+                hierarchy->renderRootNode();
+            }
+        }
+        ImGui::TreePop();
+    }
+}
+
+void DatabaseSidebarNew::handleDatabaseContextMenu(const std::shared_ptr<DatabaseInterface>& db) {
+    if (!db) {
+        return;
+    }
+
+    if (ImGui::BeginPopupContextItem(nullptr)) {
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                            ImVec2(Theme::Spacing::M, Theme::Spacing::M));
+        if (db->isConnected() && db->getConnectionInfo().type == DatabaseType::SQLITE) {
+            auto* sqliteDb = dynamic_cast<SQLiteDatabase*>(db.get());
+            if (sqliteDb) {
+                if (ImGui::MenuItem("New SQL Editor")) {
+                    Application::getInstance().getTabManager()->createSQLEditorTab("", sqliteDb);
+                }
+                if (ImGui::MenuItem("Show Diagram")) {
+                    Application::getInstance().getTabManager()->createDiagramTab(sqliteDb);
+                }
+                ImGui::Separator();
+            }
+        }
+        auto& app = Application::getInstance();
+
+        if (db->isConnected()) {
+            auto dbType = db->getConnectionInfo().type;
+            if (dbType == DatabaseType::POSTGRESQL || dbType == DatabaseType::REDSHIFT ||
+                dbType == DatabaseType::MYSQL || dbType == DatabaseType::MARIADB ||
+                dbType == DatabaseType::MSSQL) {
+                if (ImGui::MenuItem("Create New Database")) {
+                    showCreateDatabaseDialog(&app, db);
+                }
+                ImGui::Separator();
+            }
+        }
+
+        if (ImGui::MenuItem("Edit connection")) {
+            showEditConnectionDialog(&app, db);
+        }
+        if (ImGui::MenuItem("Rename")) {
+            const std::string oldName = db->getConnectionInfo().name;
+            InputDialog::show(
+                "Rename Connection", "New name:", oldName, "Rename",
+                [db, &app, oldName](const std::string& newName) -> std::string {
+                    if (app.getAppState()->renameConnection(db->getConnectionId(), newName)) {
+                        auto info = db->getConnectionInfo();
+                        info.name = newName;
+                        db->setConnectionInfo(info);
+                        return "";
+                    }
+                    return "Failed to rename connection";
+                },
+                nullptr,
+                [oldName](const std::string& newName) -> std::string {
+                    if (newName == oldName)
+                        return "New name must be different";
+                    if (newName.empty())
+                        return "Name cannot be empty";
+                    return "";
+                });
+        }
+
+        if (db->isConnected() && db->getConnectionInfo().type != DatabaseType::SQLITE) {
+            if (ImGui::MenuItem("Disconnect")) {
+                db->disconnect();
+            }
+        }
+
+        ImGui::Separator();
+        if (ImGui::MenuItem("Remove Database")) {
+            auto const connectionInfo = db->getConnectionInfo();
+            Alert::show(
+                "Remove Database",
+                std::format("Remove '{}' and delete the saved connection?", connectionInfo.name),
+                {{"Cancel", []() {}, AlertButton::Style::Cancel},
+                 {"Remove",
+                  [db, connectionInfo]() {
+                      auto& app = Application::getInstance();
+                      if (app.getAppState()->deleteConnection(db->getConnectionId())) {
+                          spdlog::debug("Removed saved connection: {}", connectionInfo.name);
+                      }
+                      spdlog::debug("Database removed: {}", connectionInfo.name);
+                      app.removeDatabase(db);
+                  },
+                  AlertButton::Style::Destructive}});
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Refresh")) {
+            spdlog::debug("Refreshing connection for database: {}", db->getConnectionInfo().name);
+            db->refreshConnection();
+        }
+        ImGui::PopStyleVar();
+        ImGui::EndPopup();
+    }
+}

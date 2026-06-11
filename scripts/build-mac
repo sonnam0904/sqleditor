@@ -1,0 +1,109 @@
+#!/bin/bash
+set -e
+
+# Check vcpkg
+VCPKG_ROOT="${VCPKG_ROOT:-$HOME/vcpkg}"
+if [ ! -f "$VCPKG_ROOT/vcpkg" ]; then
+    echo "ERROR: vcpkg not found at $VCPKG_ROOT"
+    echo "Install it with:"
+    echo "  git clone https://github.com/microsoft/vcpkg.git ~/vcpkg"
+    echo "  ~/vcpkg/bootstrap-vcpkg.sh"
+    exit 1
+fi
+
+echo "==> vcpkg packages managed via vcpkg.json manifest"
+export VCPKG_ROOT
+
+# Configuration
+TEAM_ID="2SY55TFJ22"
+DEVELOPER_NAME="Binh Bui"
+IDENTITY="Developer ID Application: ${DEVELOPER_NAME} (${TEAM_ID})"
+KEYCHAIN_PROFILE="notarytool-sqleditor"
+
+# Paths
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Load app metadata
+source "$PROJECT_DIR/APP_METADATA"
+BUILD_DIR="${PROJECT_DIR}/build_release"
+APP_PATH="${BUILD_DIR}/${APP_NAME}.app"
+DMG_PATH="${BUILD_DIR}/${APP_NAME}.dmg"
+ZIP_PATH="${BUILD_DIR}/${APP_NAME}.zip"
+
+echo "==> Building ${APP_NAME}..."
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+
+# Clear CMake cache to ensure vcpkg is used
+rm -rf CMakeCache.txt CMakeFiles
+
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(sysctl -n hw.ncpu)
+
+# Verify no Homebrew references
+echo ""
+echo "==> Verifying no Homebrew dependencies..."
+if otool -L "$APP_PATH/Contents/MacOS/$APP_NAME" | grep -q "/opt/homebrew"; then
+    echo "ERROR: Homebrew dependencies found!"
+    otool -L "$APP_PATH/Contents/MacOS/$APP_NAME" | grep "/opt/homebrew"
+    exit 1
+fi
+echo "    No Homebrew dependencies - good!"
+
+# Sign with Developer ID
+echo ""
+echo "==> Signing with Developer ID..."
+codesign --force --deep --sign "$IDENTITY" --options runtime "$APP_PATH"
+
+echo ""
+echo "==> Verifying signature..."
+codesign -dv "$APP_PATH" 2>&1 | grep -E "Authority|Identifier"
+
+# Notarize
+echo ""
+echo "==> Creating ZIP for notarization..."
+rm -f "$ZIP_PATH"
+ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+
+echo ""
+echo "==> Notarizing app..."
+xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$KEYCHAIN_PROFILE" --wait
+
+echo ""
+echo "==> Stapling app..."
+xcrun stapler staple "$APP_PATH"
+rm -f "$ZIP_PATH"
+
+# Create DMG
+echo ""
+echo "==> Creating DMG with Applications shortcut..."
+rm -f "$DMG_PATH"
+create-dmg \
+  --volname "$APP_NAME" \
+  --volicon "${PROJECT_DIR}/assets/AppIcon.icns" \
+  --window-pos 200 120 \
+  --window-size 600 400 \
+  --icon-size 100 \
+  --icon "$APP_NAME.app" 150 190 \
+  --hide-extension "$APP_NAME.app" \
+  --app-drop-link 450 190 \
+  "$DMG_PATH" \
+  "$APP_PATH"
+
+echo ""
+echo "==> Notarizing DMG..."
+xcrun notarytool submit "$DMG_PATH" --keychain-profile "$KEYCHAIN_PROFILE" --wait
+
+echo ""
+echo "==> Stapling DMG..."
+xcrun stapler staple "$DMG_PATH"
+
+# verification
+echo ""
+echo "==> Verifying..."
+spctl --assess --verbose "$APP_PATH"
+
+echo ""
+echo "==> Done! Release ready at:"
+echo "    ${DMG_PATH}"

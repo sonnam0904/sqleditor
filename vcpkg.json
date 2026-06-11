@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "sqleditor",
+  "version": "0.1.7",
+  "description": "Cross-platform SQL database client",
+  "builtin-baseline": "77df67cfff9c12ccfdb52284e07c87c75092f723",
+  "dependencies": [
+    {
+      "name": "sqlite3",
+      "features": ["dbstat"]
+    },
+    "nlohmann-json",
+    {
+      "name": "libpq",
+      "features": ["openssl"],
+      "default-features": false
+    },
+    "openssl",
+    "libmariadb",
+    {
+      "name": "hiredis",
+      "features": ["ssl"]
+    },
+    "mongo-cxx-driver",
+    "libuv",
+    "zlib",
+    "cpp-httplib",
+    "tree-sitter",
+    "gtest",
+    "nativefiledialog-extended",
+    {
+      "name": "glfw3",
+      "platform": "!linux"
+    },
+    {
+      "name": "sentry-native",
+      "features": ["backend", "transport", "compression"]
+    },
+    "libiconv",
+    "spdlog"
+  ]
+}

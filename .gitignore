@@ -1,0 +1,55 @@
+# Build directories
+build/
+build_*/
+out/
+vcpkg_installed/
+
+# Auto-downloaded dependencies
+external/WinSparkle/
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# CMake
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Executables
+*.exe
+*.out
+*.app
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Generated files
+compile_commands.json
+imgui.ini
+# zed
+.cache
+.env
+.flatpak-builder
+*.log
+external/Sparkle/
+
+.test-certs/
+
+# WiX build artifacts
+WixToolset.*.dll
+*.wixpdb
+*.wixobj
+
+SECRETS

@@ -1,0 +1,542 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-"$ROOT_DIR/build"}"
+
+# Container names
+POSTGRES_CONTAINER="sqleditor-postgres-test"
+MYSQL_CONTAINER="sqleditor-mysql-test"
+REDIS_CONTAINER="sqleditor-redis-test"
+MONGODB_CONTAINER="sqleditor-mongodb-test"
+MSSQL_CONTAINER="sqleditor-mssql-test"
+ORACLE_CONTAINER="sqleditor-oracle-test"
+REDSHIFT_CONTAINER="sqleditor-redshift-test"
+CASSANDRA_CONTAINER="sqleditor-cassandra-test"
+SSH_CONTAINER="sqleditor-ssh-test"
+
+# Docker images
+POSTGRES_IMAGE="postgres:15-alpine"
+MYSQL_IMAGE="mysql:8.0"
+REDIS_IMAGE="redis:7-alpine"
+MONGODB_IMAGE="mongo:7.0"
+MSSQL_IMAGE="mcr.microsoft.com/mssql/server:2022-latest"
+ORACLE_IMAGE="gvenzl/oracle-xe:21-slim-faststart"
+REDSHIFT_IMAGE="postgres:15-alpine"
+CASSANDRA_IMAGE="cassandra:5"
+SSH_IMAGE="sqleditor-ssh-test-img"
+
+# for SSH tunnel tests
+DOCKER_NETWORK="sqleditor-test-net"
+
+# Ports (host ports mapped to container ports)
+POSTGRES_PORT="${POSTGRES_PORT:-55432}"
+MYSQL_PORT="${MYSQL_PORT:-53306}"
+REDIS_PORT="${REDIS_PORT:-56379}"
+REDIS_TLS_PORT="${REDIS_TLS_PORT:-56380}"
+MONGODB_PORT="${MONGODB_PORT:-57017}"
+MSSQL_PORT="${MSSQL_PORT:-51433}"
+ORACLE_PORT="${ORACLE_PORT:-51521}"
+REDSHIFT_PORT="${REDSHIFT_PORT:-55439}"
+CASSANDRA_PORT="${CASSANDRA_PORT:-59042}"
+SSH_PORT="${SSH_PORT:-52222}"
+
+# TLS cert directory
+CERT_DIR="$ROOT_DIR/.test-certs"
+TLS_SETUP_VERSION="6"
+
+# Test env vars
+export SQLEDITOR_TEST_PG_HOST="127.0.0.1"
+export SQLEDITOR_TEST_PG_PORT="$POSTGRES_PORT"
+export SQLEDITOR_TEST_PG_DB="sqleditor_test"
+export SQLEDITOR_TEST_PG_USER="postgres"
+export SQLEDITOR_TEST_PG_PASSWORD="postgres"
+export SQLEDITOR_TEST_PG_NAME="PostgresDocker"
+
+export SQLEDITOR_TEST_MYSQL_HOST="127.0.0.1"
+export SQLEDITOR_TEST_MYSQL_PORT="$MYSQL_PORT"
+export SQLEDITOR_TEST_MYSQL_DB="sqleditor_test"
+export SQLEDITOR_TEST_MYSQL_USER="root"
+export SQLEDITOR_TEST_MYSQL_PASSWORD="mysql"
+export SQLEDITOR_TEST_MYSQL_NAME="MySQLDocker"
+
+export SQLEDITOR_TEST_REDIS_HOST="127.0.0.1"
+export SQLEDITOR_TEST_REDIS_PORT="$REDIS_PORT"
+export SQLEDITOR_TEST_REDIS_TLS_PORT="$REDIS_TLS_PORT"
+export SQLEDITOR_TEST_REDIS_NAME="RedisDocker"
+
+export SQLEDITOR_TEST_MONGODB_HOST="127.0.0.1"
+export SQLEDITOR_TEST_MONGODB_PORT="$MONGODB_PORT"
+export SQLEDITOR_TEST_MONGODB_DB="test"
+export SQLEDITOR_TEST_MONGODB_NAME="MongoDBDocker"
+
+export SQLEDITOR_TEST_MSSQL_HOST="127.0.0.1"
+export SQLEDITOR_TEST_MSSQL_PORT="$MSSQL_PORT"
+export SQLEDITOR_TEST_MSSQL_DB="sqleditor_test"
+export SQLEDITOR_TEST_MSSQL_USER="sa"
+export SQLEDITOR_TEST_MSSQL_PASSWORD="SQLEditor_Test1!"
+export SQLEDITOR_TEST_MSSQL_NAME="MSSQLDocker"
+
+export SQLEDITOR_TEST_ORACLE_HOST="127.0.0.1"
+export SQLEDITOR_TEST_ORACLE_PORT="$ORACLE_PORT"
+export SQLEDITOR_TEST_ORACLE_DB="XEPDB1"
+export SQLEDITOR_TEST_ORACLE_USER="system"
+export SQLEDITOR_TEST_ORACLE_PASSWORD="SQLEditor_Test1"
+export SQLEDITOR_TEST_ORACLE_NAME="OracleDocker"
+
+export SQLEDITOR_TEST_REDSHIFT_HOST="127.0.0.1"
+export SQLEDITOR_TEST_REDSHIFT_PORT="$REDSHIFT_PORT"
+export SQLEDITOR_TEST_REDSHIFT_DB="dev"
+export SQLEDITOR_TEST_REDSHIFT_USER="postgres"
+export SQLEDITOR_TEST_REDSHIFT_PASSWORD="redshift"
+export SQLEDITOR_TEST_REDSHIFT_NAME="RedshiftDocker"
+
+export SQLEDITOR_TEST_CASSANDRA_HOST="127.0.0.1"
+export SQLEDITOR_TEST_CASSANDRA_PORT="$CASSANDRA_PORT"
+export SQLEDITOR_TEST_CASSANDRA_NAME="CassandraDocker"
+
+# SSH tunnel test env vars
+export SQLEDITOR_TEST_SSH_HOST="127.0.0.1"
+export SQLEDITOR_TEST_SSH_PORT="$SSH_PORT"
+export SQLEDITOR_TEST_SSH_USER="testuser"
+export SQLEDITOR_TEST_SSH_PASSWORD="testpass"
+# set after cert generation
+export SQLEDITOR_TEST_SSH_KEY=""
+export SQLEDITOR_TEST_CA_CERT=""
+export SQLEDITOR_TEST_SSH_PG_REMOTE_HOST="$POSTGRES_CONTAINER"
+export SQLEDITOR_SSH_KNOWN_HOSTS_FILE="/dev/null"
+
+# ── Docker helpers ──────────────────────────────────────────────────
+
+DOCKER=(docker)
+if ! docker info >/dev/null 2>&1; then
+    if command -v sudo >/dev/null 2>&1; then
+        DOCKER=(sudo docker)
+    fi
+fi
+
+docker_cmd() {
+    "${DOCKER[@]}" "$@"
+}
+
+container_exists() {
+    docker_cmd ps -a --format '{{.Names}}' | grep -Fxq "$1"
+}
+
+container_image() {
+    docker_cmd inspect -f '{{.Config.Image}}' "$1" 2>/dev/null || true
+}
+
+container_on_network() {
+    docker_cmd inspect -f '{{json .NetworkSettings.Networks}}' "$1" 2>/dev/null | \
+        grep -Fq "\"$2\""
+}
+
+remove_if_image_mismatch() {
+    local name="$1" expected_image="$2"
+    if container_exists "$name"; then
+        local actual_image
+        actual_image="$(container_image "$name")"
+        if [[ "$actual_image" != "$expected_image" ]]; then
+            echo "Recreating $name (expected image $expected_image, found ${actual_image:-<unknown>})"
+            docker_cmd rm -f "$name" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+ensure_container_on_network() {
+    local name="$1" network="$2"
+    if container_exists "$name" && ! container_on_network "$name" "$network"; then
+        echo "Connecting $name to Docker network $network"
+        docker_cmd network connect "$network" "$name" >/dev/null 2>&1 || true
+    fi
+}
+
+# ── Port / readiness checks ────────────────────────────────────────
+
+port_open() {
+    (exec 3<>"/dev/tcp/${1}/${2}") 2>/dev/null && exec 3>&-
+}
+
+wait_for_port() {
+    local host="$1" port="$2" name="$3" max="${4:-60}"
+    printf "Waiting for %s on %s:%s" "$name" "$host" "$port"
+    for ((i = 0; i < max; ++i)); do
+        if port_open "$host" "$port"; then
+            echo " ... ready"
+            return 0
+        fi
+        printf "."
+        sleep 1
+    done
+    echo " ... timeout"
+    return 1
+}
+
+wait_for_command() {
+    local name="$1" max="${2:-60}"
+    shift 2
+    printf "Waiting for %s" "$name"
+    for ((i = 0; i < max; ++i)); do
+        if "$@" >/dev/null 2>&1; then
+            echo " ... ready"
+            return 0
+        fi
+        printf "."
+        sleep 1
+    done
+    echo " ... timeout"
+    return 1
+}
+
+start_or_create() {
+    local name="$1"
+    shift
+    if docker_cmd ps --format '{{.Names}}' | grep -Fxq "$name"; then
+        return
+    fi
+    if docker_cmd ps -a --format '{{.Names}}' | grep -Fxq "$name"; then
+        docker_cmd start "$name" >/dev/null
+        return
+    fi
+    docker_cmd run -d --name "$name" "$@" >/dev/null
+}
+
+ssh_test_environment_ready() {
+    [[ ! -d "$CERT_DIR" ]] && return 0
+    container_exists "$SSH_CONTAINER" &&
+    [[ "$(container_image "$SSH_CONTAINER")" == "$SSH_IMAGE" ]] &&
+    container_on_network "$SSH_CONTAINER" "$DOCKER_NETWORK" &&
+    container_on_network "$POSTGRES_CONTAINER" "$DOCKER_NETWORK"
+}
+
+# ── TLS certificate generation ────────────────────────────────────
+
+generate_certs() {
+    echo "=== Generating TLS certificates ==="
+    mkdir -p "$CERT_DIR"
+
+    # CA key and cert
+    openssl req -new -x509 -days 365 -nodes \
+        -out "$CERT_DIR/ca.crt" \
+        -keyout "$CERT_DIR/ca.key" \
+        -subj "/CN=SQLEditor Test CA" 2>/dev/null
+
+    # server key
+    openssl genrsa -out "$CERT_DIR/server.key" 2048 2>/dev/null
+
+    # server CSR
+    openssl req -new -key "$CERT_DIR/server.key" \
+        -out "$CERT_DIR/server.csr" \
+        -subj "/CN=localhost" 2>/dev/null
+
+    # SAN extension file
+    cat > "$CERT_DIR/server.ext" <<EXTEOF
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = localhost
+IP.1 = 127.0.0.1
+EXTEOF
+
+    # sign server cert
+    openssl x509 -req -in "$CERT_DIR/server.csr" \
+        -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" -CAcreateserial \
+        -out "$CERT_DIR/server.crt" -days 365 \
+        -extfile "$CERT_DIR/server.ext" 2>/dev/null
+
+    # world-readable: these are ephemeral test certs and container
+    # processes (redis, mongod) run as non-root users
+    chmod 644 "$CERT_DIR/server.key"
+
+    # MongoDB needs combined PEM (cert + key)
+    cat "$CERT_DIR/server.crt" "$CERT_DIR/server.key" > "$CERT_DIR/server.pem"
+    chmod 644 "$CERT_DIR/server.pem"
+
+    # SSH test keys
+    ssh-keygen -t ed25519 -f "$CERT_DIR/ssh_test_key" -N "" -q -y 2>/dev/null || \
+        ssh-keygen -t ed25519 -f "$CERT_DIR/ssh_test_key" -N "" -q
+
+    echo "$TLS_SETUP_VERSION" > "$CERT_DIR/.version"
+    echo "TLS certificates generated in $CERT_DIR"
+}
+
+setup_tls_certs() {
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "Warning: openssl not found, skipping TLS/SSH test setup"
+        return
+    fi
+
+    local current_version=""
+    if [[ -f "$CERT_DIR/.version" ]]; then
+        current_version="$(cat "$CERT_DIR/.version")"
+    fi
+
+    if [[ "$current_version" == "$TLS_SETUP_VERSION" ]]; then
+        return
+    fi
+
+    generate_certs
+
+    # remove old containers so they get recreated with TLS mounts
+    echo "Recreating containers with TLS support..."
+    for name in "$POSTGRES_CONTAINER" "$REDIS_CONTAINER" "$MONGODB_CONTAINER"; do
+        docker_cmd rm -f "$name" 2>/dev/null || true
+    done
+    docker_cmd rm -f "$SSH_CONTAINER" 2>/dev/null || true
+}
+
+# ── Ensure all servers are reachable ────────────────────────────────
+
+all_ports_open() {
+    port_open 127.0.0.1 "$POSTGRES_PORT" &&
+    port_open 127.0.0.1 "$MYSQL_PORT" &&
+    port_open 127.0.0.1 "$REDIS_PORT" &&
+    port_open 127.0.0.1 "$MONGODB_PORT" &&
+    port_open 127.0.0.1 "$MSSQL_PORT" &&
+    port_open 127.0.0.1 "$ORACLE_PORT" &&
+    port_open 127.0.0.1 "$REDSHIFT_PORT" &&
+    port_open 127.0.0.1 "$CASSANDRA_PORT" &&
+    { [[ ! -d "$CERT_DIR" ]] || port_open 127.0.0.1 "$REDIS_TLS_PORT"; } &&
+    { [[ ! -d "$CERT_DIR" ]] || port_open 127.0.0.1 "$SSH_PORT"; } &&
+    ssh_test_environment_ready
+}
+
+setup_containers() {
+    if ! docker_cmd info >/dev/null 2>&1; then
+        echo "Error: Docker is not reachable." >&2
+        exit 1
+    fi
+
+    echo "=== Setting up test databases ==="
+
+    # create Docker network for SSH tunnel tests
+    docker_cmd network create "$DOCKER_NETWORK" 2>/dev/null || true
+
+    local has_certs=false
+    [[ -d "$CERT_DIR" && -f "$CERT_DIR/server.crt" ]] && has_certs=true
+
+    if $has_certs; then
+        remove_if_image_mismatch "$SSH_CONTAINER" "$SSH_IMAGE"
+        ensure_container_on_network "$POSTGRES_CONTAINER" "$DOCKER_NETWORK"
+    fi
+
+    # ── PostgreSQL ──
+    # must be on DOCKER_NETWORK so SSH container can resolve its hostname
+    if $has_certs; then
+        start_or_create "$POSTGRES_CONTAINER" \
+            --network "$DOCKER_NETWORK" \
+            -e POSTGRES_PASSWORD="$SQLEDITOR_TEST_PG_PASSWORD" \
+            -p "127.0.0.1:${POSTGRES_PORT}:5432" \
+            -v "$CERT_DIR:/certs:ro" \
+            --entrypoint sh \
+            "$POSTGRES_IMAGE" \
+            -c 'cp /certs/server.crt /certs/server.key /var/lib/postgresql/ && \
+                chown 70:70 /var/lib/postgresql/server.crt /var/lib/postgresql/server.key && \
+                chmod 600 /var/lib/postgresql/server.key && \
+                exec docker-entrypoint.sh postgres \
+                    -c ssl=on \
+                    -c ssl_cert_file=/var/lib/postgresql/server.crt \
+                    -c ssl_key_file=/var/lib/postgresql/server.key \
+                    -c ssl_ca_file=/var/lib/postgresql/server.crt'
+    else
+        start_or_create "$POSTGRES_CONTAINER" \
+            --network "$DOCKER_NETWORK" \
+            -e POSTGRES_PASSWORD="$SQLEDITOR_TEST_PG_PASSWORD" \
+            -p "127.0.0.1:${POSTGRES_PORT}:5432" \
+            "$POSTGRES_IMAGE"
+    fi
+    wait_for_port 127.0.0.1 "$POSTGRES_PORT" "PostgreSQL"
+    wait_for_command "PostgreSQL" 60 docker_cmd exec "$POSTGRES_CONTAINER" \
+        pg_isready -h localhost -U postgres
+
+    # ── MySQL (auto-generates TLS certs, no changes needed) ──
+    start_or_create "$MYSQL_CONTAINER" \
+        -e MYSQL_ROOT_PASSWORD=mysql \
+        -p "127.0.0.1:${MYSQL_PORT}:3306" \
+        "$MYSQL_IMAGE"
+    wait_for_port 127.0.0.1 "$MYSQL_PORT" "MySQL"
+    wait_for_command "MySQL" 60 docker_cmd exec "$MYSQL_CONTAINER" \
+        mysqladmin ping -uroot -pmysql --silent
+
+    # ── Redis (with TLS port if certs available) ──
+    if $has_certs; then
+        start_or_create "$REDIS_CONTAINER" \
+            -v "$CERT_DIR:/certs:ro" \
+            -p "127.0.0.1:${REDIS_PORT}:6379" \
+            -p "127.0.0.1:${REDIS_TLS_PORT}:6380" \
+            "$REDIS_IMAGE" \
+            redis-server \
+                --port 6379 \
+                --tls-port 6380 \
+                --tls-cert-file /certs/server.crt \
+                --tls-key-file /certs/server.key \
+                --tls-ca-cert-file /certs/ca.crt \
+                --tls-auth-clients no
+    else
+        start_or_create "$REDIS_CONTAINER" \
+            -p "127.0.0.1:${REDIS_PORT}:6379" \
+            "$REDIS_IMAGE"
+    fi
+    wait_for_port 127.0.0.1 "$REDIS_PORT" "Redis"
+    wait_for_command "Redis" 60 docker_cmd exec "$REDIS_CONTAINER" redis-cli ping
+
+    # ── MongoDB (with TLS if certs available) ──
+    if $has_certs; then
+        start_or_create "$MONGODB_CONTAINER" \
+            -v "$CERT_DIR:/certs:ro" \
+            -p "127.0.0.1:${MONGODB_PORT}:27017" \
+            "$MONGODB_IMAGE" \
+            mongod --bind_ip_all \
+                --tlsMode allowTLS \
+                --tlsCertificateKeyFile /certs/server.pem \
+                --tlsCAFile /certs/ca.crt \
+                --tlsAllowConnectionsWithoutCertificates
+    else
+        start_or_create "$MONGODB_CONTAINER" \
+            -p "127.0.0.1:${MONGODB_PORT}:27017" \
+            "$MONGODB_IMAGE"
+    fi
+    wait_for_port 127.0.0.1 "$MONGODB_PORT" "MongoDB"
+    wait_for_command "MongoDB" 60 docker_cmd exec "$MONGODB_CONTAINER" \
+        mongosh --quiet --eval 'db.runCommand({ ping: 1 })'
+
+    # ── MSSQL (auto-generates TLS certs, no changes needed) ──
+    start_or_create "$MSSQL_CONTAINER" \
+        -e "ACCEPT_EULA=Y" \
+        -e "MSSQL_SA_PASSWORD=$SQLEDITOR_TEST_MSSQL_PASSWORD" \
+        -p "127.0.0.1:${MSSQL_PORT}:1433" \
+        "$MSSQL_IMAGE"
+    wait_for_port 127.0.0.1 "$MSSQL_PORT" "MSSQL"
+    wait_for_command "MSSQL" 90 docker_cmd exec "$MSSQL_CONTAINER" \
+        /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa \
+        -P "$SQLEDITOR_TEST_MSSQL_PASSWORD" -C -Q "SELECT 1"
+
+    # create MSSQL test database if it doesn't exist
+    docker_cmd exec "$MSSQL_CONTAINER" \
+        /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa \
+        -P "$SQLEDITOR_TEST_MSSQL_PASSWORD" -C \
+        -Q "IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = '$SQLEDITOR_TEST_MSSQL_DB') CREATE DATABASE [$SQLEDITOR_TEST_MSSQL_DB]" \
+        >/dev/null 2>&1 || true
+
+    # ── Oracle XE (faststart image for quick startup) ──
+    start_or_create "$ORACLE_CONTAINER" \
+        -e "ORACLE_PASSWORD=$SQLEDITOR_TEST_ORACLE_PASSWORD" \
+        -p "127.0.0.1:${ORACLE_PORT}:1521" \
+        "$ORACLE_IMAGE"
+    wait_for_port 127.0.0.1 "$ORACLE_PORT" "Oracle"
+    wait_for_command "Oracle" 120 docker_cmd exec "$ORACLE_CONTAINER" \
+        healthcheck.sh
+
+    # ── Redshift (PostgreSQL-compatible) ──
+    start_or_create "$REDSHIFT_CONTAINER" \
+        -e POSTGRES_DB="$SQLEDITOR_TEST_REDSHIFT_DB" \
+        -e POSTGRES_PASSWORD="$SQLEDITOR_TEST_REDSHIFT_PASSWORD" \
+        -p "127.0.0.1:${REDSHIFT_PORT}:5432" \
+        "$REDSHIFT_IMAGE"
+    wait_for_port 127.0.0.1 "$REDSHIFT_PORT" "Redshift"
+    wait_for_command "Redshift" 60 docker_cmd exec "$REDSHIFT_CONTAINER" \
+        pg_isready -h localhost -U postgres
+
+    # ── Cassandra ──
+    # Cassandra binds 9042 early (port_open succeeds long before CQL is ready),
+    # and nodetool/cqlsh probes spawn a new JVM/Python each call (slow). The
+    # only fast & accurate readiness signal is the log line emitted when the
+    # native transport starts accepting clients.
+    #
+    # We also pin the heap explicitly: inside Docker Desktop the auto-sizer
+    # often picks a tiny heap and the JVM thrashes for minutes during bootstrap.
+    start_or_create "$CASSANDRA_CONTAINER" \
+        -e CASSANDRA_CLUSTER_NAME=SQLEditorTest \
+        -e MAX_HEAP_SIZE=1G \
+        -e HEAP_NEWSIZE=200M \
+        -p "127.0.0.1:${CASSANDRA_PORT}:9042" \
+        "$CASSANDRA_IMAGE"
+    wait_for_command "Cassandra" 600 docker_cmd exec "$CASSANDRA_CONTAINER" \
+        sh -c "grep -q 'Starting listening for CQL clients' /var/log/cassandra/system.log 2>/dev/null \
+            || grep -q 'Starting listening for CQL clients' /opt/cassandra/logs/system.log 2>/dev/null"
+
+    # ── SSH server (for tunnel tests, same network as PostgreSQL) ──
+    if $has_certs; then
+        # build minimal SSH image with the test public key baked in
+        echo "Building SSH test image..."
+        docker_cmd build -t "$SSH_IMAGE" -f - "$CERT_DIR" <<'DOCKERFILE'
+FROM alpine:3.19
+RUN apk add --no-cache openssh-server && \
+    ssh-keygen -A && \
+    adduser -D -s /bin/sh testuser && \
+    echo "testuser:testpass" | chpasswd && \
+    mkdir -p /home/testuser/.ssh && \
+    chmod 700 /home/testuser/.ssh && \
+    sed -i 's/^#PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^AllowTcpForwarding .*/AllowTcpForwarding yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^GatewayPorts .*/GatewayPorts yes/' /etc/ssh/sshd_config && \
+    sed -i 's/^#PermitTunnel .*/PermitTunnel yes/' /etc/ssh/sshd_config
+COPY ssh_test_key.pub /home/testuser/.ssh/authorized_keys
+RUN chown -R testuser:testuser /home/testuser/.ssh && \
+    chmod 600 /home/testuser/.ssh/authorized_keys
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]
+DOCKERFILE
+
+        start_or_create "$SSH_CONTAINER" \
+            --network "$DOCKER_NETWORK" \
+            -p "127.0.0.1:${SSH_PORT}:22" \
+            "$SSH_IMAGE"
+        ensure_container_on_network "$SSH_CONTAINER" "$DOCKER_NETWORK"
+        wait_for_port 127.0.0.1 "$SSH_PORT" "SSH"
+        wait_for_command "SSH forwarding" 30 docker_cmd exec "$SSH_CONTAINER" sh -lc \
+            "sshd -T | grep -q '^allowtcpforwarding yes$' && \
+             sshd -T | grep -q '^gatewayports yes$'"
+    fi
+
+    echo ""
+}
+
+# ── Main ───────────────────────────────────────────────────────────
+
+setup_tls_certs
+
+# export cert paths after generation
+if [[ -f "$CERT_DIR/ssh_test_key" ]]; then
+    export SQLEDITOR_TEST_SSH_KEY="$CERT_DIR/ssh_test_key"
+fi
+if [[ -f "$CERT_DIR/ca.crt" ]]; then
+    export SQLEDITOR_TEST_CA_CERT="$CERT_DIR/ca.crt"
+fi
+
+if all_ports_open; then
+    echo "All test servers already reachable, skipping setup."
+else
+    setup_containers
+fi
+
+# ── Build & run tests ──────────────────────────────────────────────
+
+mkdir -p "$BUILD_DIR"
+echo "Building database_tests and sql_format_tests..."
+cmake -S "$ROOT_DIR" -B "$BUILD_DIR" > /dev/null
+cmake --build "$BUILD_DIR" --target database_tests sql_format_tests
+
+echo ""
+echo "PostgreSQL:  $SQLEDITOR_TEST_PG_HOST:$SQLEDITOR_TEST_PG_PORT"
+echo "MySQL:       $SQLEDITOR_TEST_MYSQL_HOST:$SQLEDITOR_TEST_MYSQL_PORT"
+echo "Redis:       $SQLEDITOR_TEST_REDIS_HOST:$SQLEDITOR_TEST_REDIS_PORT (TLS: $REDIS_TLS_PORT)"
+echo "MongoDB:     $SQLEDITOR_TEST_MONGODB_HOST:$SQLEDITOR_TEST_MONGODB_PORT"
+echo "MSSQL:       $SQLEDITOR_TEST_MSSQL_HOST:$SQLEDITOR_TEST_MSSQL_PORT"
+echo "Oracle:      $SQLEDITOR_TEST_ORACLE_HOST:$SQLEDITOR_TEST_ORACLE_PORT"
+echo "Redshift:    $SQLEDITOR_TEST_REDSHIFT_HOST:$SQLEDITOR_TEST_REDSHIFT_PORT ($SQLEDITOR_TEST_REDSHIFT_DB)"
+echo "Cassandra:   $SQLEDITOR_TEST_CASSANDRA_HOST:$SQLEDITOR_TEST_CASSANDRA_PORT"
+echo "SSH:         $SQLEDITOR_TEST_SSH_HOST:$SQLEDITOR_TEST_SSH_PORT"
+echo "CA cert:     ${SQLEDITOR_TEST_CA_CERT:-<not available>}"
+echo ""
+
+cd "$BUILD_DIR"
+./database_tests "$@"
+./sql_format_tests "$@"

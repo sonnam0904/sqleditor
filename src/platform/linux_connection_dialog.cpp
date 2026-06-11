@@ -1,0 +1,2054 @@
+#if defined(__linux__)
+
+#include "app_state.hpp"
+#include "application.hpp"
+#include "database/cassandra.hpp"
+#include "database/connection_url.hpp"
+#include "database/db_interface.hpp"
+#include "database/mongodb.hpp"
+#include "database/mssql.hpp"
+#include "database/mysql.hpp"
+#include "database/oracle.hpp"
+#include "database/oracle/oracle_client_installer.hpp"
+#include "database/postgresql.hpp"
+#include "database/query_executor.hpp"
+#include "database/redis.hpp"
+#include "database/sqlite.hpp"
+#include "database/ssh_config_parser.hpp"
+#include "database/ssl_config.hpp"
+#include "embedded_images.hpp"
+#include "platform/connection_dialog.hpp"
+#include "platform/linux_platform.hpp"
+#include "utils/file_dialog.hpp"
+#include <atomic>
+#include <cstring>
+#include <gtk/gtk.h>
+#include <thread>
+
+struct ConnectionDialogData {
+    Application* app = nullptr;
+    std::shared_ptr<DatabaseInterface> editingDb;
+    int editingConnectionId = -1;
+    std::atomic<bool> cancelled{false};
+
+    GtkWidget* dialog = nullptr;
+    GtkWidget* nameEntry = nullptr;
+    GtkWidget* typeDropdown = nullptr;
+    GtkWidget* fieldsBox = nullptr;
+
+    // SQLite
+    GtkWidget* sqlitePathEntry = nullptr;
+
+    // Server
+    GtkWidget* hostEntry = nullptr;
+    GtkWidget* portEntry = nullptr;
+    GtkWidget* databaseEntry = nullptr;
+    GtkWidget* mongoOptionsEntry = nullptr;
+
+    // SSL
+    GtkWidget* sslModeDropdown = nullptr;
+    GtkWidget* sslCACertPathEntry = nullptr;
+    GtkWidget* sslCACertPathRow = nullptr;
+
+    // Auth
+    GtkWidget* authPasswordRadio = nullptr;
+    GtkWidget* authNoneRadio = nullptr;
+    GtkWidget* usernameEntry = nullptr;
+    GtkWidget* passwordEntry = nullptr;
+    GtkWidget* credentialsRow = nullptr;
+
+    // Oracle Instant Client
+    OracleClientInstaller oracleInstaller;
+    guint oraclePollingTimerId = 0;
+
+    // Show all databases
+    GtkWidget* showAllDbsCheck = nullptr;
+
+    // SSH Tunnel
+    GtkWidget* sshExpander = nullptr;
+    GtkWidget* sshEnabledCheck = nullptr;
+    GtkWidget* sshFieldsBox = nullptr;
+    GtkWidget* sshHostEntry = nullptr;
+    GtkWidget* sshPortEntry = nullptr;
+    GtkWidget* sshUsernameEntry = nullptr;
+    GtkWidget* sshAuthPasswordRadio = nullptr;
+    GtkWidget* sshAuthKeyRadio = nullptr;
+    GtkWidget* sshPasswordEntry = nullptr;
+    GtkWidget* sshPasswordRow = nullptr;
+    GtkWidget* sshKeyPathEntry = nullptr;
+    GtkWidget* sshKeyRow = nullptr;
+
+    // Cached SSH config hosts
+    std::vector<SSHHostEntry> sshConfigHosts;
+    bool sshConfigLoaded = false;
+
+    // Type icon
+    GtkWidget* typeIcon = nullptr;
+
+    // Bottom
+    GtkWidget* statusLabel = nullptr;
+    GtkWidget* spinner = nullptr;
+    GtkWidget* connectButton = nullptr;
+
+    // content box (set as window child only at presentation time)
+    GtkWidget* contentBox = nullptr;
+
+    // signal handler ID for type dropdown
+    gulong typeChangedHandlerId = 0;
+    bool isPopulatingFields = false;
+
+    // URL field — bidirectionally sync'd with the form fields.
+    GtkWidget* urlEntry = nullptr;
+    GtkWidget* urlRow = nullptr;
+    GtkWidget* urlErrorLabel = nullptr;
+    // Reentrancy guard: set while we programmatically update fields, to keep
+    // the change handlers from looping.
+    bool suppressFieldSync = false;
+};
+
+struct CreateDatabaseDialogData {
+    Application* app = nullptr;
+    std::shared_ptr<DatabaseInterface> db;
+
+    GtkWidget* dialog = nullptr;
+    GtkWidget* nameEntry = nullptr;
+    GtkWidget* commentEntry = nullptr;
+
+    // PostgreSQL
+    GtkWidget* ownerDropdown = nullptr;
+    GtkWidget* templateDropdown = nullptr;
+    GtkWidget* encodingDropdown = nullptr;
+    GtkWidget* tablespaceDropdown = nullptr;
+    GtkWidget* pgOptionsSpinnerRow = nullptr;
+    std::atomic<bool> pgOptionsLoading{false};
+
+    // MySQL
+    GtkWidget* charsetDropdown = nullptr;
+    GtkWidget* collationDropdown = nullptr;
+
+    GtkWidget* statusLabel = nullptr;
+    GtkWidget* spinner = nullptr;
+    GtkWidget* createButton = nullptr;
+};
+
+static GtkWidget* sActiveConnectionDialog = nullptr;
+static GtkWidget* sActiveCreateDatabaseDialog = nullptr;
+
+static GtkWidget* getParentWindow(Application* app) {
+    auto* platform = dynamic_cast<LinuxPlatform*>(app->getPlatform());
+    return platform ? platform->getGtkWindow() : nullptr;
+}
+
+static GtkWidget* makeLabel(const char* text) {
+    GtkWidget* label = gtk_label_new(text);
+    gtk_widget_set_halign(label, GTK_ALIGN_END);
+    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(label, "dim-label");
+    gtk_widget_set_size_request(label, 90, -1);
+    return label;
+}
+
+static GtkWidget* makeEntry(const char* placeholder) {
+    GtkWidget* entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), placeholder);
+    gtk_widget_set_hexpand(entry, TRUE);
+    return entry;
+}
+
+static GtkWidget* makeRow(GtkWidget* label, GtkWidget* field) {
+    GtkWidget* row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(row), label);
+    gtk_box_append(GTK_BOX(row), field);
+    return row;
+}
+
+static void clearBox(GtkWidget* box) {
+    GtkWidget* child = gtk_widget_get_first_child(box);
+    while (child) {
+        GtkWidget* next = gtk_widget_get_next_sibling(child);
+        gtk_box_remove(GTK_BOX(box), child);
+        child = next;
+    }
+}
+
+static void updateTypeIcon(GtkWidget* image, DatabaseType type) {
+    const std::string name = databaseTypeToString(type);
+    const EmbeddedImage* img = findEmbeddedImage(name.c_str());
+    if (!img) {
+        gtk_widget_set_visible(image, FALSE);
+        return;
+    }
+    GBytes* bytes = g_bytes_new_static(img->data, img->size);
+    GdkTexture* texture = gdk_texture_new_from_bytes(bytes, nullptr);
+    g_bytes_unref(bytes);
+    if (!texture) {
+        gtk_widget_set_visible(image, FALSE);
+        return;
+    }
+    gtk_image_set_from_paintable(GTK_IMAGE(image), GDK_PAINTABLE(texture));
+    gtk_widget_set_visible(image, TRUE);
+    g_object_unref(texture);
+}
+
+static GtkWidget* makeStringDropdown(const char* const items[], int count, int selected) {
+    GtkStringList* model = gtk_string_list_new(nullptr);
+    for (int i = 0; i < count; i++) {
+        gtk_string_list_append(model, items[i]);
+    }
+    GtkWidget* dropdown = gtk_drop_down_new(G_LIST_MODEL(model), nullptr);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(dropdown), selected >= 0 ? selected : 0);
+    return dropdown;
+}
+
+static void onAuthToggled(GtkCheckButton*, gpointer userData) {
+    auto* data = static_cast<ConnectionDialogData*>(userData);
+    if (data->isPopulatingFields)
+        return;
+    bool show = gtk_check_button_get_active(GTK_CHECK_BUTTON(data->authPasswordRadio));
+    gtk_widget_set_visible(data->credentialsRow, show);
+}
+
+static void refreshDynamicFieldState(ConnectionDialogData* data) {
+    if (data->credentialsRow && data->authPasswordRadio) {
+        bool showCredentials =
+            gtk_check_button_get_active(GTK_CHECK_BUTTON(data->authPasswordRadio));
+        gtk_widget_set_visible(data->credentialsRow, showCredentials);
+    }
+
+    if (data->sshFieldsBox && data->sshEnabledCheck) {
+        bool sshEnabled = gtk_check_button_get_active(GTK_CHECK_BUTTON(data->sshEnabledCheck));
+        gtk_widget_set_sensitive(data->sshFieldsBox, sshEnabled);
+    }
+
+    if (data->sshPasswordRow && data->sshKeyRow && data->sshAuthPasswordRadio) {
+        bool passwordAuth =
+            gtk_check_button_get_active(GTK_CHECK_BUTTON(data->sshAuthPasswordRadio));
+        gtk_widget_set_visible(data->sshPasswordRow, passwordAuth);
+        gtk_widget_set_visible(data->sshKeyRow, !passwordAuth);
+    }
+
+    if (data->sslCACertPathRow && data->sslModeDropdown && data->typeDropdown) {
+        auto type = static_cast<DatabaseType>(
+            gtk_drop_down_get_selected(GTK_DROP_DOWN(data->typeDropdown)));
+        auto cfg = getSslConfig(type);
+        guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(data->sslModeDropdown));
+        SslMode val = (idx < static_cast<guint>(cfg.count)) ? cfg.values[idx] : SslMode::Disable;
+        gtk_widget_set_visible(data->sslCACertPathRow, sslModeNeedsCACert(val));
+    }
+}
+
+static void presentConnectionDialog(ConnectionDialogData* data) {
+    // attach content to window only now, so GTK never renders partial/stale content
+    if (data->contentBox) {
+        gtk_window_set_child(GTK_WINDOW(data->dialog), data->contentBox);
+        data->contentBox = nullptr;
+    }
+    GtkWidget* parent = getParentWindow(data->app);
+    if (parent) {
+        gtk_window_set_transient_for(GTK_WINDOW(data->dialog), GTK_WINDOW(parent));
+    }
+    gtk_window_set_modal(GTK_WINDOW(data->dialog), TRUE);
+    gtk_window_present(GTK_WINDOW(data->dialog));
+}
+
+// defer presentation to next main loop iteration so the ImGui popup closes cleanly first
+static void presentConnectionDialogDeferred(ConnectionDialogData* data) {
+    g_object_ref(data->dialog);
+    g_idle_add(
+        +[](gpointer ud) -> gboolean {
+            auto* dlg = static_cast<GtkWidget*>(ud);
+            auto* d = static_cast<ConnectionDialogData*>(g_object_get_data(G_OBJECT(dlg), "data"));
+            if (d) {
+                presentConnectionDialog(d);
+            }
+            g_object_unref(dlg);
+            return G_SOURCE_REMOVE;
+        },
+        data->dialog);
+}
+
+static void rebuildFieldsForType(ConnectionDialogData* data);
+
+// Apply a parsed connection URL to the open dialog's widgets.
+static void applyParsedUrlToDialog(ConnectionDialogData* data, const DatabaseConnectionInfo& info) {
+    if (!data || !data->typeDropdown)
+        return;
+
+    guint targetType = static_cast<guint>(info.type);
+    g_signal_handler_block(data->typeDropdown, data->typeChangedHandlerId);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(data->typeDropdown), targetType);
+    rebuildFieldsForType(data);
+    g_signal_handler_unblock(data->typeDropdown, data->typeChangedHandlerId);
+
+    if (info.type == DatabaseType::SQLITE) {
+        if (data->sqlitePathEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->sqlitePathEntry), info.path.c_str());
+        return;
+    }
+
+    if (data->hostEntry)
+        gtk_editable_set_text(GTK_EDITABLE(data->hostEntry), info.host.c_str());
+    if (data->portEntry && info.port > 0) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", info.port);
+        gtk_editable_set_text(GTK_EDITABLE(data->portEntry), buf);
+    }
+    if (data->databaseEntry)
+        gtk_editable_set_text(GTK_EDITABLE(data->databaseEntry), info.database.c_str());
+    if (data->mongoOptionsEntry)
+        gtk_editable_set_text(GTK_EDITABLE(data->mongoOptionsEntry), info.mongoOptions.c_str());
+
+    if (!info.username.empty() || !info.password.empty()) {
+        if (data->authPasswordRadio)
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authPasswordRadio), TRUE);
+        if (data->usernameEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->usernameEntry), info.username.c_str());
+        if (data->passwordEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->passwordEntry), info.password.c_str());
+    } else {
+        if (data->authNoneRadio)
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authNoneRadio), TRUE);
+        if (data->usernameEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->usernameEntry), "");
+        if (data->passwordEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->passwordEntry), "");
+    }
+
+    if (data->sslModeDropdown) {
+        auto sslCfg = getSslConfig(info.type);
+        for (int i = 0; i < sslCfg.count; i++) {
+            if (info.sslmode == sslCfg.values[i]) {
+                gtk_drop_down_set_selected(GTK_DROP_DOWN(data->sslModeDropdown), i);
+                break;
+            }
+        }
+    }
+    if (data->sslCACertPathEntry)
+        gtk_editable_set_text(GTK_EDITABLE(data->sslCACertPathEntry), info.sslCACertPath.c_str());
+}
+
+// Snapshot the current form fields into a DatabaseConnectionInfo. Mirrors what
+// the connect handler reads, minus SSH (which has no URL representation).
+static DatabaseConnectionInfo snapshotFormInfo(ConnectionDialogData* data) {
+    DatabaseConnectionInfo info;
+    int sel =
+        data->typeDropdown ? gtk_drop_down_get_selected(GTK_DROP_DOWN(data->typeDropdown)) : 0;
+    info.type = static_cast<DatabaseType>(sel);
+    if (data->nameEntry)
+        info.name = gtk_editable_get_text(GTK_EDITABLE(data->nameEntry));
+
+    if (info.type == DatabaseType::SQLITE) {
+        if (data->sqlitePathEntry)
+            info.path = gtk_editable_get_text(GTK_EDITABLE(data->sqlitePathEntry));
+        return info;
+    }
+
+    if (data->hostEntry)
+        info.host = gtk_editable_get_text(GTK_EDITABLE(data->hostEntry));
+    if (data->portEntry) {
+        const char* p = gtk_editable_get_text(GTK_EDITABLE(data->portEntry));
+        info.port = (p && *p) ? atoi(p) : 0;
+    }
+    if (data->databaseEntry)
+        info.database = gtk_editable_get_text(GTK_EDITABLE(data->databaseEntry));
+    if (data->mongoOptionsEntry)
+        info.mongoOptions = gtk_editable_get_text(GTK_EDITABLE(data->mongoOptionsEntry));
+
+    bool authPassword = data->authPasswordRadio &&
+                        gtk_check_button_get_active(GTK_CHECK_BUTTON(data->authPasswordRadio));
+    if (authPassword) {
+        if (data->usernameEntry)
+            info.username = gtk_editable_get_text(GTK_EDITABLE(data->usernameEntry));
+        if (data->passwordEntry)
+            info.password = gtk_editable_get_text(GTK_EDITABLE(data->passwordEntry));
+    }
+
+    if (data->sslModeDropdown) {
+        auto cfg = getSslConfig(info.type);
+        guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(data->sslModeDropdown));
+        if ((int)idx < cfg.count)
+            info.sslmode = cfg.values[idx];
+    }
+    if (data->sslCACertPathEntry)
+        info.sslCACertPath = gtk_editable_get_text(GTK_EDITABLE(data->sslCACertPathEntry));
+    return info;
+}
+
+// Rebuild the URL entry from the current form. Suppresses reentrant change
+// signals on the URL entry.
+static void rebuildUrlFromForm(ConnectionDialogData* data) {
+    if (!data->urlEntry || data->suppressFieldSync)
+        return;
+    DatabaseConnectionInfo info = snapshotFormInfo(data);
+    std::string url = buildConnectionUrl(info);
+    data->suppressFieldSync = true;
+    gtk_editable_set_text(GTK_EDITABLE(data->urlEntry), url.c_str());
+    if (data->urlErrorLabel) {
+        gtk_label_set_text(GTK_LABEL(data->urlErrorLabel), "");
+        gtk_widget_set_visible(data->urlErrorLabel, FALSE);
+    }
+    data->suppressFieldSync = false;
+}
+
+// Parse the URL entry and apply to form fields. Suppresses reentrant change
+// signals on the form fields.
+static void applyUrlToForm(ConnectionDialogData* data) {
+    if (!data->urlEntry || data->suppressFieldSync)
+        return;
+    const char* text = gtk_editable_get_text(GTK_EDITABLE(data->urlEntry));
+    std::string url = text ? text : "";
+    if (url.empty()) {
+        if (data->urlErrorLabel) {
+            gtk_label_set_text(GTK_LABEL(data->urlErrorLabel), "");
+            gtk_widget_set_visible(data->urlErrorLabel, FALSE);
+        }
+        return;
+    }
+    auto result = parseConnectionUrl(url);
+    if (!result.ok) {
+        if (data->urlErrorLabel) {
+            gtk_label_set_text(GTK_LABEL(data->urlErrorLabel), ("Error: " + result.error).c_str());
+            gtk_widget_set_visible(data->urlErrorLabel, TRUE);
+        }
+        return;
+    }
+    if (data->urlErrorLabel) {
+        gtk_label_set_text(GTK_LABEL(data->urlErrorLabel), "");
+        gtk_widget_set_visible(data->urlErrorLabel, FALSE);
+    }
+    data->suppressFieldSync = true;
+    applyParsedUrlToDialog(data, result.info);
+    data->suppressFieldSync = false;
+}
+
+// Connect URL-sync signals on a freshly-rebuilt form. Each handler calls
+// rebuildUrlFromForm; the suppress flag prevents loops during programmatic
+// applies (gtk_editable_set_text fires "changed" in GTK4).
+static void hookFormSyncHandlers(ConnectionDialogData* data) {
+    auto onChange =
+        +[](GObject*, gpointer ud) { rebuildUrlFromForm(static_cast<ConnectionDialogData*>(ud)); };
+    auto hookEntry = [&](GtkWidget* w) {
+        if (w)
+            g_signal_connect(w, "changed", G_CALLBACK(onChange), data);
+    };
+    auto hookDropdown = [&](GtkWidget* w) {
+        if (w)
+            g_signal_connect(w, "notify::selected",
+                             G_CALLBACK(+[](GObject*, GParamSpec*, gpointer ud) {
+                                 rebuildUrlFromForm(static_cast<ConnectionDialogData*>(ud));
+                             }),
+                             data);
+    };
+    auto hookToggle = [&](GtkWidget* w) {
+        if (w)
+            g_signal_connect(w, "toggled", G_CALLBACK(onChange), data);
+    };
+
+    hookEntry(data->sqlitePathEntry);
+    hookEntry(data->hostEntry);
+    hookEntry(data->portEntry);
+    hookEntry(data->databaseEntry);
+    hookEntry(data->mongoOptionsEntry);
+    hookEntry(data->usernameEntry);
+    hookEntry(data->passwordEntry);
+    hookEntry(data->sslCACertPathEntry);
+    hookDropdown(data->sslModeDropdown);
+    hookToggle(data->authPasswordRadio);
+    hookToggle(data->authNoneRadio);
+}
+
+static void rebuildFieldsForType(ConnectionDialogData* data) {
+    clearBox(data->fieldsBox);
+
+    // Reset widget pointers
+    data->sqlitePathEntry = nullptr;
+    data->hostEntry = nullptr;
+    data->portEntry = nullptr;
+    data->databaseEntry = nullptr;
+    data->mongoOptionsEntry = nullptr;
+    data->sslModeDropdown = nullptr;
+    data->sslCACertPathEntry = nullptr;
+    data->sslCACertPathRow = nullptr;
+    data->authPasswordRadio = nullptr;
+    data->authNoneRadio = nullptr;
+    data->usernameEntry = nullptr;
+    data->passwordEntry = nullptr;
+    data->credentialsRow = nullptr;
+    data->showAllDbsCheck = nullptr;
+    data->sshExpander = nullptr;
+    data->sshEnabledCheck = nullptr;
+    data->sshFieldsBox = nullptr;
+    data->sshHostEntry = nullptr;
+    data->sshPortEntry = nullptr;
+    data->sshUsernameEntry = nullptr;
+    data->sshAuthPasswordRadio = nullptr;
+    data->sshAuthKeyRadio = nullptr;
+    data->sshPasswordEntry = nullptr;
+    data->sshPasswordRow = nullptr;
+    data->sshKeyPathEntry = nullptr;
+    data->sshKeyRow = nullptr;
+
+    int selectedType = gtk_drop_down_get_selected(GTK_DROP_DOWN(data->typeDropdown));
+    auto type = static_cast<DatabaseType>(selectedType);
+
+    // SQLite has no useful URL form — hide the URL row entirely.
+    bool showUrl = (type != DatabaseType::SQLITE);
+    if (data->urlRow)
+        gtk_widget_set_visible(data->urlRow, showUrl);
+    if (data->urlErrorLabel && !showUrl)
+        gtk_widget_set_visible(data->urlErrorLabel, FALSE);
+
+    if (type == DatabaseType::SQLITE) {
+        // Path + Browse
+        data->sqlitePathEntry = makeEntry("Database file path");
+        GtkWidget* browseBtn = gtk_button_new_with_label("Browse...");
+        g_signal_connect(
+            browseBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer ud) {
+                auto* d = static_cast<ConnectionDialogData*>(ud);
+                auto db = FileDialog::openSQLiteFile();
+                if (db) {
+                    auto sqliteDb = std::dynamic_pointer_cast<SQLiteDatabase>(db);
+                    if (sqliteDb) {
+                        gtk_editable_set_text(GTK_EDITABLE(d->sqlitePathEntry),
+                                              sqliteDb->getPath().c_str());
+                        const char* name = gtk_editable_get_text(GTK_EDITABLE(d->nameEntry));
+                        if (!name || strlen(name) == 0 ||
+                            strcmp(name, "Untitled connection") == 0) {
+                            gtk_editable_set_text(GTK_EDITABLE(d->nameEntry),
+                                                  sqliteDb->getConnectionInfo().name.c_str());
+                        }
+                    }
+                }
+            }),
+            data);
+
+        GtkWidget* pathRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(pathRow), makeLabel("File"));
+        gtk_box_append(GTK_BOX(pathRow), data->sqlitePathEntry);
+        gtk_box_append(GTK_BOX(pathRow), browseBtn);
+        gtk_box_append(GTK_BOX(data->fieldsBox), pathRow);
+        return;
+    }
+
+    // --- Server fields ---
+
+    // Host + Port
+    const char* hostPlaceholder =
+        type == DatabaseType::MONGODB ? "host:port,host2:port2" : "localhost";
+    data->hostEntry = makeEntry(hostPlaceholder);
+    gtk_editable_set_text(GTK_EDITABLE(data->hostEntry),
+                          type == DatabaseType::MONGODB ? "" : "localhost");
+    data->portEntry = makeEntry("5432");
+    gtk_widget_set_size_request(data->portEntry, 70, -1);
+    gtk_widget_set_hexpand(data->portEntry, FALSE);
+
+    // Default port by type
+    const char* defaultPort = "5432";
+    if (type == DatabaseType::MYSQL || type == DatabaseType::MARIADB)
+        defaultPort = "3306";
+    else if (type == DatabaseType::MONGODB)
+        defaultPort = "27017";
+    else if (type == DatabaseType::REDIS)
+        defaultPort = "6379";
+    else if (type == DatabaseType::MSSQL)
+        defaultPort = "1433";
+    else if (type == DatabaseType::ORACLE)
+        defaultPort = "1521";
+    else if (type == DatabaseType::REDSHIFT)
+        defaultPort = "5439";
+    else if (type == DatabaseType::CASSANDRA)
+        defaultPort = "9042";
+    gtk_editable_set_text(GTK_EDITABLE(data->portEntry), defaultPort);
+
+    GtkWidget* hostRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(hostRow),
+                   makeLabel(type == DatabaseType::MONGODB ? "Host(s)" : "Host"));
+    gtk_box_append(GTK_BOX(hostRow), data->hostEntry);
+    GtkWidget* portLabel = gtk_label_new("Port");
+    gtk_widget_add_css_class(portLabel, "dim-label");
+    gtk_box_append(GTK_BOX(hostRow), portLabel);
+    gtk_box_append(GTK_BOX(hostRow), data->portEntry);
+    gtk_box_append(GTK_BOX(data->fieldsBox), hostRow);
+
+    // Database (not for Redis)
+    if (type != DatabaseType::REDIS) {
+        const char* dbLabel = type == DatabaseType::ORACLE ? "Service" : "Database";
+        const char* dbPlaceholder =
+            type == DatabaseType::ORACLE ? "e.g. XEPDB1, ORCL, FREEPDB1" : "(optional)";
+        data->databaseEntry = makeEntry(dbPlaceholder);
+        GtkWidget* dbRow = makeRow(makeLabel(dbLabel), data->databaseEntry);
+        gtk_box_append(GTK_BOX(data->fieldsBox), dbRow);
+    }
+
+    if (type == DatabaseType::MONGODB) {
+        data->mongoOptionsEntry = makeEntry("replicaSet=myReplicaSet");
+        GtkWidget* mongoOptsRow =
+            makeRow(makeLabel("URI Options"), data->mongoOptionsEntry);
+        gtk_box_append(GTK_BOX(data->fieldsBox), mongoOptsRow);
+    }
+
+    if (data->oraclePollingTimerId) {
+        g_source_remove(data->oraclePollingTimerId);
+        data->oraclePollingTimerId = 0;
+    }
+
+    // SSL Mode (all server types)
+    {
+        auto sslCfg = getSslConfig(type);
+        data->sslModeDropdown = makeStringDropdown(sslCfg.labels, sslCfg.count, sslCfg.defaultIdx);
+        GtkWidget* sslRow = makeRow(makeLabel("SSL Mode"), data->sslModeDropdown);
+        gtk_box_append(GTK_BOX(data->fieldsBox), sslRow);
+
+        const bool isOracle = type == DatabaseType::ORACLE;
+        data->sslCACertPathEntry = makeEntry(isOracle ? "/path/to/wallet" : "/path/to/ca-cert.pem");
+        GtkWidget* browseCertBtn = gtk_button_new_with_label("Browse...");
+        g_signal_connect(
+            browseCertBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer ud) {
+                auto* d = static_cast<ConnectionDialogData*>(ud);
+                GtkFileDialog* fileDialog = gtk_file_dialog_new();
+                gtk_file_dialog_set_title(fileDialog, "Select CA Certificate");
+
+                auto* filter = gtk_file_filter_new();
+                gtk_file_filter_set_name(filter, "Certificates (*.pem, *.crt, *.cer)");
+                gtk_file_filter_add_pattern(filter, "*.pem");
+                gtk_file_filter_add_pattern(filter, "*.crt");
+                gtk_file_filter_add_pattern(filter, "*.cer");
+                auto* allFilter = gtk_file_filter_new();
+                gtk_file_filter_set_name(allFilter, "All Files");
+                gtk_file_filter_add_pattern(allFilter, "*");
+                auto* filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
+                g_list_store_append(filters, filter);
+                g_list_store_append(filters, allFilter);
+                gtk_file_dialog_set_filters(fileDialog, G_LIST_MODEL(filters));
+                g_object_unref(filter);
+                g_object_unref(allFilter);
+                g_object_unref(filters);
+
+                gtk_file_dialog_open(
+                    fileDialog, GTK_WINDOW(d->dialog), nullptr,
+                    +[](GObject* source, GAsyncResult* res, gpointer ud2) {
+                        auto* d2 = static_cast<ConnectionDialogData*>(ud2);
+                        GFile* file =
+                            gtk_file_dialog_open_finish(GTK_FILE_DIALOG(source), res, nullptr);
+                        if (file) {
+                            char* path = g_file_get_path(file);
+                            if (path) {
+                                gtk_editable_set_text(GTK_EDITABLE(d2->sslCACertPathEntry), path);
+                                g_free(path);
+                            }
+                            g_object_unref(file);
+                        }
+                    },
+                    d);
+                g_object_unref(fileDialog);
+            }),
+            data);
+
+        data->sslCACertPathRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_box_append(GTK_BOX(data->sslCACertPathRow), makeLabel(isOracle ? "Wallet" : "CA Cert"));
+        gtk_box_append(GTK_BOX(data->sslCACertPathRow), data->sslCACertPathEntry);
+        gtk_box_append(GTK_BOX(data->sslCACertPathRow), browseCertBtn);
+        gtk_box_append(GTK_BOX(data->fieldsBox), data->sslCACertPathRow);
+        gtk_widget_set_visible(data->sslCACertPathRow, FALSE);
+
+        // Show CA cert row when verify-ca or verify-full selected
+        g_signal_connect(data->sslModeDropdown, "notify::selected",
+                         G_CALLBACK(+[](GObject* obj, GParamSpec*, gpointer userdata) {
+                             auto* d = static_cast<ConnectionDialogData*>(userdata);
+                             if (d->isPopulatingFields)
+                                 return;
+                             if (!d->sslCACertPathRow || !d->sslModeDropdown || !d->typeDropdown)
+                                 return;
+                             auto type = static_cast<DatabaseType>(
+                                 gtk_drop_down_get_selected(GTK_DROP_DOWN(d->typeDropdown)));
+                             auto cfg = getSslConfig(type);
+                             guint idx =
+                                 gtk_drop_down_get_selected(GTK_DROP_DOWN(d->sslModeDropdown));
+                             SslMode val =
+                                 (idx < (guint)cfg.count) ? cfg.values[idx] : SslMode::Disable;
+                             bool showCa = sslModeNeedsCACert(val);
+                             gtk_widget_set_visible(d->sslCACertPathRow, showCa);
+                         }),
+                         data);
+    }
+
+    // Auth radio
+    bool defaultNoAuth = (type == DatabaseType::MONGODB || type == DatabaseType::REDIS);
+    data->authPasswordRadio = gtk_check_button_new_with_label("Username & Password");
+    data->authNoneRadio = gtk_check_button_new_with_label("None");
+    gtk_check_button_set_group(GTK_CHECK_BUTTON(data->authNoneRadio),
+                               GTK_CHECK_BUTTON(data->authPasswordRadio));
+    gtk_check_button_set_active(
+        GTK_CHECK_BUTTON(defaultNoAuth ? data->authNoneRadio : data->authPasswordRadio), TRUE);
+
+    GtkWidget* authRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(authRow), makeLabel("Auth"));
+    gtk_box_append(GTK_BOX(authRow), data->authPasswordRadio);
+    gtk_box_append(GTK_BOX(authRow), data->authNoneRadio);
+    gtk_box_append(GTK_BOX(data->fieldsBox), authRow);
+
+    // Credentials row
+    data->usernameEntry = makeEntry("Username");
+    data->passwordEntry = gtk_password_entry_new();
+    gtk_password_entry_set_show_peek_icon(GTK_PASSWORD_ENTRY(data->passwordEntry), TRUE);
+    gtk_widget_set_hexpand(data->passwordEntry, TRUE);
+
+    data->credentialsRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(data->credentialsRow), makeLabel("Username"));
+    gtk_box_append(GTK_BOX(data->credentialsRow), data->usernameEntry);
+    GtkWidget* pwLabel = gtk_label_new("Password");
+    gtk_widget_add_css_class(pwLabel, "dim-label");
+    gtk_box_append(GTK_BOX(data->credentialsRow), pwLabel);
+    gtk_box_append(GTK_BOX(data->credentialsRow), data->passwordEntry);
+    gtk_box_append(GTK_BOX(data->fieldsBox), data->credentialsRow);
+
+    gtk_widget_set_visible(data->credentialsRow, !defaultNoAuth);
+
+    g_signal_connect(data->authPasswordRadio, "toggled", G_CALLBACK(onAuthToggled), data);
+
+    // Show all databases (not for Redis)
+    if (type != DatabaseType::REDIS) {
+        data->showAllDbsCheck = gtk_check_button_new_with_label("Show all databases");
+        GtkWidget* checkRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        // Spacer to align with fields
+        GtkWidget* spacer = gtk_label_new("");
+        gtk_widget_set_size_request(spacer, 90, -1);
+        gtk_box_append(GTK_BOX(checkRow), spacer);
+        gtk_box_append(GTK_BOX(checkRow), data->showAllDbsCheck);
+        gtk_box_append(GTK_BOX(data->fieldsBox), checkRow);
+    }
+
+    // --- SSH Tunnel section ---
+    GtkWidget* sshSep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_append(GTK_BOX(data->fieldsBox), sshSep);
+
+    data->sshEnabledCheck = gtk_check_button_new_with_label("Connect via SSH tunnel");
+    GtkWidget* sshEnableRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget* sshSpacer = gtk_label_new("");
+    gtk_widget_set_size_request(sshSpacer, 90, -1);
+    gtk_box_append(GTK_BOX(sshEnableRow), sshSpacer);
+    gtk_box_append(GTK_BOX(sshEnableRow), data->sshEnabledCheck);
+    gtk_box_append(GTK_BOX(data->fieldsBox), sshEnableRow);
+
+    data->sshFieldsBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_sensitive(data->sshFieldsBox, FALSE);
+    gtk_box_append(GTK_BOX(data->fieldsBox), data->sshFieldsBox);
+
+    // SSH Host + Port
+    data->sshHostEntry = makeEntry("SSH host");
+    data->sshPortEntry = makeEntry("22");
+    gtk_editable_set_text(GTK_EDITABLE(data->sshPortEntry), "22");
+    gtk_widget_set_size_request(data->sshPortEntry, 70, -1);
+    gtk_widget_set_hexpand(data->sshPortEntry, FALSE);
+
+    GtkWidget* sshHostRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(sshHostRow), makeLabel("SSH Host"));
+    gtk_box_append(GTK_BOX(sshHostRow), data->sshHostEntry);
+    GtkWidget* sshPortLabel = gtk_label_new("Port");
+    gtk_widget_add_css_class(sshPortLabel, "dim-label");
+    gtk_box_append(GTK_BOX(sshHostRow), sshPortLabel);
+    gtk_box_append(GTK_BOX(sshHostRow), data->sshPortEntry);
+    gtk_box_append(GTK_BOX(data->sshFieldsBox), sshHostRow);
+
+    // SSH Username
+    data->sshUsernameEntry = makeEntry("SSH username");
+    GtkWidget* sshUserRow = makeRow(makeLabel("SSH User"), data->sshUsernameEntry);
+    gtk_box_append(GTK_BOX(data->sshFieldsBox), sshUserRow);
+
+    // SSH Auth method radios
+    data->sshAuthPasswordRadio = gtk_check_button_new_with_label("Password");
+    data->sshAuthKeyRadio = gtk_check_button_new_with_label("Private Key");
+    gtk_check_button_set_group(GTK_CHECK_BUTTON(data->sshAuthKeyRadio),
+                               GTK_CHECK_BUTTON(data->sshAuthPasswordRadio));
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(data->sshAuthPasswordRadio), TRUE);
+
+    GtkWidget* sshAuthRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(sshAuthRow), makeLabel("SSH Auth"));
+    gtk_box_append(GTK_BOX(sshAuthRow), data->sshAuthPasswordRadio);
+    gtk_box_append(GTK_BOX(sshAuthRow), data->sshAuthKeyRadio);
+    gtk_box_append(GTK_BOX(data->sshFieldsBox), sshAuthRow);
+
+    // SSH Password row
+    data->sshPasswordEntry = gtk_password_entry_new();
+    gtk_password_entry_set_show_peek_icon(GTK_PASSWORD_ENTRY(data->sshPasswordEntry), TRUE);
+    gtk_widget_set_hexpand(data->sshPasswordEntry, TRUE);
+    data->sshPasswordRow = makeRow(makeLabel("SSH Pass"), data->sshPasswordEntry);
+    gtk_box_append(GTK_BOX(data->sshFieldsBox), data->sshPasswordRow);
+
+    // SSH Key path row
+    data->sshKeyPathEntry = makeEntry("~/.ssh/id_rsa");
+    GtkWidget* browseKeyBtn = gtk_button_new_with_label("Browse...");
+    g_signal_connect(
+        browseKeyBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer ud) {
+            auto* d = static_cast<ConnectionDialogData*>(ud);
+            GtkFileDialog* fileDialog = gtk_file_dialog_new();
+            gtk_file_dialog_set_title(fileDialog, "Select Private Key");
+
+            // default to ~/.ssh/
+            const char* home = g_get_home_dir();
+            if (home) {
+                std::string sshDir = std::string(home) + "/.ssh";
+                auto* folder = g_file_new_for_path(sshDir.c_str());
+                gtk_file_dialog_set_initial_folder(fileDialog, folder);
+                g_object_unref(folder);
+            }
+
+            gtk_file_dialog_open(
+                fileDialog, GTK_WINDOW(d->dialog), nullptr,
+                +[](GObject* source, GAsyncResult* res, gpointer ud2) {
+                    auto* d2 = static_cast<ConnectionDialogData*>(ud2);
+                    GFile* file =
+                        gtk_file_dialog_open_finish(GTK_FILE_DIALOG(source), res, nullptr);
+                    if (file) {
+                        char* path = g_file_get_path(file);
+                        if (path) {
+                            gtk_editable_set_text(GTK_EDITABLE(d2->sshKeyPathEntry), path);
+                            g_free(path);
+                        }
+                        g_object_unref(file);
+                    }
+                },
+                d);
+            g_object_unref(fileDialog);
+        }),
+        data);
+
+    data->sshKeyRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(data->sshKeyRow), makeLabel("Key File"));
+    gtk_box_append(GTK_BOX(data->sshKeyRow), data->sshKeyPathEntry);
+    gtk_box_append(GTK_BOX(data->sshKeyRow), browseKeyBtn);
+    gtk_widget_set_visible(data->sshKeyRow, FALSE);
+    gtk_box_append(GTK_BOX(data->sshFieldsBox), data->sshKeyRow);
+
+    // Toggle SSH auth method visibility
+    g_signal_connect(data->sshAuthPasswordRadio, "toggled",
+                     G_CALLBACK(+[](GtkCheckButton*, gpointer ud) {
+                         auto* d = static_cast<ConnectionDialogData*>(ud);
+                         if (d->isPopulatingFields)
+                             return;
+                         bool passwordAuth =
+                             gtk_check_button_get_active(GTK_CHECK_BUTTON(d->sshAuthPasswordRadio));
+                         gtk_widget_set_visible(d->sshPasswordRow, passwordAuth);
+                         gtk_widget_set_visible(d->sshKeyRow, !passwordAuth);
+                     }),
+                     data);
+
+    // Toggle SSH fields sensitivity
+    g_signal_connect(
+        data->sshEnabledCheck, "toggled", G_CALLBACK(+[](GtkCheckButton*, gpointer ud) {
+            auto* d = static_cast<ConnectionDialogData*>(ud);
+            if (d->isPopulatingFields)
+                return;
+            bool enabled = gtk_check_button_get_active(GTK_CHECK_BUTTON(d->sshEnabledCheck));
+            gtk_widget_set_sensitive(d->sshFieldsBox, enabled);
+        }),
+        data);
+
+    // Auto-fill from ~/.ssh/config when SSH host changes
+    g_signal_connect(data->sshHostEntry, "changed", G_CALLBACK(+[](GtkEditable*, gpointer ud) {
+                         auto* d = static_cast<ConnectionDialogData*>(ud);
+                         if (d->isPopulatingFields)
+                             return;
+                         if (!d->sshConfigLoaded) {
+                             d->sshConfigHosts = parseSSHConfig();
+                             d->sshConfigLoaded = true;
+                         }
+                         const char* text = gtk_editable_get_text(GTK_EDITABLE(d->sshHostEntry));
+                         if (!text)
+                             return;
+                         std::string hostText(text);
+                         for (const auto& entry : d->sshConfigHosts) {
+                             if (entry.alias == hostText) {
+                                 if (!entry.hostname.empty())
+                                     gtk_editable_set_text(GTK_EDITABLE(d->sshHostEntry),
+                                                           entry.hostname.c_str());
+                                 if (!entry.user.empty())
+                                     gtk_editable_set_text(GTK_EDITABLE(d->sshUsernameEntry),
+                                                           entry.user.c_str());
+                                 if (entry.port != 22) {
+                                     char portBuf[16];
+                                     snprintf(portBuf, sizeof(portBuf), "%d", entry.port);
+                                     gtk_editable_set_text(GTK_EDITABLE(d->sshPortEntry), portBuf);
+                                 }
+                                 if (!entry.identityFile.empty()) {
+                                     gtk_editable_set_text(GTK_EDITABLE(d->sshKeyPathEntry),
+                                                           entry.identityFile.c_str());
+                                     gtk_check_button_set_active(
+                                         GTK_CHECK_BUTTON(d->sshAuthKeyRadio), TRUE);
+                                 }
+                                 break;
+                             }
+                         }
+                     }),
+                     data);
+
+    hookFormSyncHandlers(data);
+}
+
+struct AsyncConnectResult {
+    GtkWidget* dialogRef;
+    bool success;
+    std::string error;
+    std::shared_ptr<DatabaseInterface> db;
+    DatabaseConnectionInfo info;
+    Application* app;
+    std::shared_ptr<DatabaseInterface> editingDb;
+    int editingConnectionId;
+    std::atomic<bool>* cancelledFlag;
+};
+
+static void handleConnectionSuccess(AsyncConnectResult* r) {
+    if (r->editingConnectionId != -1 && r->editingDb) {
+        SavedConnection conn;
+        conn.id = r->editingConnectionId;
+        conn.connectionInfo = r->info;
+        conn.workspaceId = r->app->getCurrentWorkspaceId();
+        r->app->getAppState()->updateConnection(conn);
+
+        r->db->setConnectionId(r->editingConnectionId);
+        auto& dbs = r->app->getDatabases();
+        for (size_t i = 0; i < dbs.size(); i++) {
+            if (dbs[i] == r->editingDb) {
+                dbs[i]->disconnect();
+                dbs[i] = r->db;
+                break;
+            }
+        }
+    } else {
+        SavedConnection conn;
+        conn.connectionInfo = r->info;
+        conn.workspaceId = r->app->getCurrentWorkspaceId();
+        int newId = r->app->saveConnection(conn);
+        if (newId > 0) {
+            r->db->setConnectionId(newId);
+        }
+        r->app->addDatabase(r->db);
+    }
+}
+
+static void connectSQLite(ConnectionDialogData* data) {
+    const char* path = gtk_editable_get_text(GTK_EDITABLE(data->sqlitePathEntry));
+    if (!path || strlen(path) == 0) {
+        gtk_label_set_text(GTK_LABEL(data->statusLabel), "Please select a database file");
+        return;
+    }
+
+    const char* name = gtk_editable_get_text(GTK_EDITABLE(data->nameEntry));
+
+    DatabaseConnectionInfo info;
+    info.type = DatabaseType::SQLITE;
+    info.name = name ? name : "";
+    info.path = path;
+
+    auto db = std::make_shared<SQLiteDatabase>(info);
+    auto [success, error] = db->connect();
+
+    if (success) {
+        if (data->editingConnectionId != -1 && data->editingDb) {
+            SavedConnection conn;
+            conn.id = data->editingConnectionId;
+            conn.connectionInfo = info;
+            conn.workspaceId = data->app->getCurrentWorkspaceId();
+            data->app->getAppState()->updateConnection(conn);
+            db->setConnectionId(data->editingConnectionId);
+            auto& dbs = data->app->getDatabases();
+            for (size_t i = 0; i < dbs.size(); i++) {
+                if (dbs[i] == data->editingDb) {
+                    dbs[i]->disconnect();
+                    dbs[i] = db;
+                    break;
+                }
+            }
+        } else {
+            SavedConnection conn;
+            conn.connectionInfo = info;
+            conn.workspaceId = data->app->getCurrentWorkspaceId();
+            int newId = data->app->saveConnection(conn);
+            if (newId > 0) {
+                db->setConnectionId(newId);
+            }
+            data->app->addDatabase(db);
+        }
+        gtk_window_destroy(GTK_WINDOW(data->dialog));
+    } else {
+        gtk_label_set_text(GTK_LABEL(data->statusLabel), ("Failed: " + error).c_str());
+    }
+}
+
+static void connectServerAsync(ConnectionDialogData* data) {
+    const char* name = gtk_editable_get_text(GTK_EDITABLE(data->nameEntry));
+    int selectedType = gtk_drop_down_get_selected(GTK_DROP_DOWN(data->typeDropdown));
+    auto type = static_cast<DatabaseType>(selectedType);
+
+    const char* host = gtk_editable_get_text(GTK_EDITABLE(data->hostEntry));
+    const char* portStr = gtk_editable_get_text(GTK_EDITABLE(data->portEntry));
+    int port = portStr ? atoi(portStr) : 0;
+    if (port <= 0)
+        port = 1;
+    if (port > 65535)
+        port = 65535;
+
+    const char* database =
+        data->databaseEntry ? gtk_editable_get_text(GTK_EDITABLE(data->databaseEntry)) : "";
+    bool authEnabled = data->authPasswordRadio &&
+                       gtk_check_button_get_active(GTK_CHECK_BUTTON(data->authPasswordRadio));
+    const char* username = (authEnabled && data->usernameEntry)
+                               ? gtk_editable_get_text(GTK_EDITABLE(data->usernameEntry))
+                               : "";
+    const char* password = (authEnabled && data->passwordEntry)
+                               ? gtk_editable_get_text(GTK_EDITABLE(data->passwordEntry))
+                               : "";
+    bool showAllDbs = data->showAllDbsCheck &&
+                      gtk_check_button_get_active(GTK_CHECK_BUTTON(data->showAllDbsCheck));
+
+    int sslModeIdx = data->sslModeDropdown
+                         ? gtk_drop_down_get_selected(GTK_DROP_DOWN(data->sslModeDropdown))
+                         : 2;
+    std::string sslCACertPath;
+    if (data->sslCACertPathEntry) {
+        const char* v = gtk_editable_get_text(GTK_EDITABLE(data->sslCACertPathEntry));
+        sslCACertPath = v ? v : "";
+    }
+
+    // Read SSH config
+    bool sshEnabled = data->sshEnabledCheck &&
+                      gtk_check_button_get_active(GTK_CHECK_BUTTON(data->sshEnabledCheck));
+    SSHConfig sshConfig;
+    if (sshEnabled) {
+        sshConfig.enabled = true;
+        const char* sshHost =
+            data->sshHostEntry ? gtk_editable_get_text(GTK_EDITABLE(data->sshHostEntry)) : "";
+        const char* sshPortStr =
+            data->sshPortEntry ? gtk_editable_get_text(GTK_EDITABLE(data->sshPortEntry)) : "22";
+        const char* sshUser = data->sshUsernameEntry
+                                  ? gtk_editable_get_text(GTK_EDITABLE(data->sshUsernameEntry))
+                                  : "";
+        sshConfig.host = sshHost ? sshHost : "";
+        sshConfig.port = sshPortStr ? atoi(sshPortStr) : 22;
+        if (sshConfig.port <= 0)
+            sshConfig.port = 22;
+        sshConfig.username = sshUser ? sshUser : "";
+
+        bool useKey = data->sshAuthKeyRadio &&
+                      gtk_check_button_get_active(GTK_CHECK_BUTTON(data->sshAuthKeyRadio));
+        if (useKey) {
+            sshConfig.authMethod = SSHAuthMethod::PrivateKey;
+            const char* keyPath = data->sshKeyPathEntry
+                                      ? gtk_editable_get_text(GTK_EDITABLE(data->sshKeyPathEntry))
+                                      : "";
+            sshConfig.privateKeyPath = keyPath ? keyPath : "";
+        } else {
+            sshConfig.authMethod = SSHAuthMethod::Password;
+            const char* sshPass = data->sshPasswordEntry
+                                      ? gtk_editable_get_text(GTK_EDITABLE(data->sshPasswordEntry))
+                                      : "";
+            sshConfig.password = sshPass ? sshPass : "";
+        }
+    }
+
+    // Validate
+    if (authEnabled && (!username || strlen(username) == 0) && type != DatabaseType::MONGODB &&
+        type != DatabaseType::REDIS) {
+        gtk_label_set_text(GTK_LABEL(data->statusLabel), "Please enter a username");
+        return;
+    }
+    if (sshEnabled && sshConfig.host.empty()) {
+        gtk_label_set_text(GTK_LABEL(data->statusLabel), "Please enter an SSH host");
+        return;
+    }
+    if (sshEnabled && sshConfig.username.empty()) {
+        gtk_label_set_text(GTK_LABEL(data->statusLabel), "Please enter an SSH username");
+        return;
+    }
+    if (sshEnabled && sshConfig.authMethod == SSHAuthMethod::PrivateKey &&
+        sshConfig.privateKeyPath.empty()) {
+        gtk_label_set_text(GTK_LABEL(data->statusLabel), "Please select an SSH private key file");
+        return;
+    }
+
+    // UI feedback — disable all inputs while connecting
+    gtk_widget_set_sensitive(data->connectButton, FALSE);
+    gtk_widget_set_sensitive(data->nameEntry, FALSE);
+    gtk_widget_set_sensitive(data->typeDropdown, FALSE);
+    gtk_widget_set_sensitive(data->fieldsBox, FALSE);
+    gtk_spinner_start(GTK_SPINNER(data->spinner));
+    gtk_label_set_text(GTK_LABEL(data->statusLabel), "Connecting...");
+
+    // Capture values
+    std::string nameStr = name ? name : "";
+    std::string hostStr = host ? host : "";
+    std::string dbStr = database ? database : "";
+    std::string userStr = username ? username : "";
+    std::string passStr = password ? password : "";
+    std::string mongoOptionsStr;
+    if (data->mongoOptionsEntry) {
+        const char* mongoOpts = gtk_editable_get_text(GTK_EDITABLE(data->mongoOptionsEntry));
+        mongoOptionsStr = mongoOpts ? mongoOpts : "";
+    }
+
+    Application* appPtr = data->app;
+    auto editingDb = data->editingDb;
+    int editConnId = data->editingConnectionId;
+    GtkWidget* dialogRef = data->dialog;
+    std::atomic<bool>* cancelledFlag = &data->cancelled;
+
+    (void)g_object_ref(dialogRef);
+
+    std::thread([=]() {
+        DatabaseConnectionInfo info;
+        info.type = type;
+        info.name = nameStr;
+        info.host = hostStr;
+        info.port = port;
+        info.mongoOptions = mongoOptionsStr;
+        info.showAllDatabases = showAllDbs;
+        auto sslCfg = getSslConfig(type);
+        info.sslmode = (sslModeIdx < sslCfg.count) ? sslCfg.values[sslModeIdx] : SslMode::Disable;
+        info.sslCACertPath = sslCACertPath;
+        info.ssh = sshConfig;
+
+        if (authEnabled) {
+            info.username = userStr;
+            info.password = passStr;
+        }
+
+        std::shared_ptr<DatabaseInterface> db;
+        switch (type) {
+        case DatabaseType::POSTGRESQL:
+            info.database = dbStr.empty() ? "postgres" : dbStr;
+            db = std::make_shared<PostgresDatabase>(info);
+            break;
+        case DatabaseType::MYSQL:
+        case DatabaseType::MARIADB:
+            info.database = dbStr.empty() ? "mysql" : dbStr;
+            db = std::make_shared<MySQLDatabase>(info);
+            break;
+        case DatabaseType::MONGODB:
+            info.database = dbStr;
+            db = std::make_shared<MongoDBDatabase>(info);
+            break;
+        case DatabaseType::REDIS:
+            db = std::make_shared<RedisDatabase>(info);
+            break;
+        case DatabaseType::MSSQL:
+            info.database = dbStr.empty() ? "master" : dbStr;
+            db = std::make_shared<MSSQLDatabase>(info);
+            break;
+        case DatabaseType::ORACLE:
+            info.database = dbStr;
+            db = std::make_shared<OracleDatabase>(info);
+            break;
+        case DatabaseType::REDSHIFT:
+            info.database = dbStr.empty() ? "dev" : dbStr;
+            db = std::make_shared<PostgresDatabase>(info);
+            break;
+        case DatabaseType::CASSANDRA:
+            info.database = dbStr;
+            db = std::make_shared<CassandraDatabase>(info);
+            break;
+        default:
+            break;
+        }
+
+        bool success = false;
+        std::string errorMsg;
+        if (db) {
+            auto [s, e] = db->connect();
+            success = s;
+            errorMsg = e;
+        } else {
+            errorMsg = "Failed to create database connection";
+        }
+
+        auto* result = new AsyncConnectResult{dialogRef, success,   errorMsg,   db,           info,
+                                              appPtr,    editingDb, editConnId, cancelledFlag};
+
+        g_idle_add(
+            +[](gpointer ud) -> gboolean {
+                auto* r = static_cast<AsyncConnectResult*>(ud);
+
+                if (r->cancelledFlag->load()) {
+                    if (r->success && r->db) {
+                        r->db->disconnect();
+                    }
+                } else if (r->success) {
+                    handleConnectionSuccess(r);
+                    gtk_window_destroy(GTK_WINDOW(r->dialogRef));
+                } else {
+                    auto* d = static_cast<ConnectionDialogData*>(
+                        g_object_get_data(G_OBJECT(r->dialogRef), "data"));
+                    if (d) {
+                        gtk_label_set_text(GTK_LABEL(d->statusLabel),
+                                           ("Failed: " + r->error).c_str());
+                        gtk_widget_set_sensitive(d->connectButton, TRUE);
+                        gtk_widget_set_sensitive(d->nameEntry, TRUE);
+                        gtk_widget_set_sensitive(d->typeDropdown, d->editingConnectionId == -1);
+                        gtk_widget_set_sensitive(d->fieldsBox, TRUE);
+                        gtk_spinner_stop(GTK_SPINNER(d->spinner));
+                    }
+                }
+
+                g_object_unref(r->dialogRef);
+                delete r;
+                return G_SOURCE_REMOVE;
+            },
+            result);
+    }).detach();
+}
+
+static void destroyConnectionDialogData(gpointer ptr) {
+    auto* data = static_cast<ConnectionDialogData*>(ptr);
+    if (data->oraclePollingTimerId) {
+        g_source_remove(data->oraclePollingTimerId);
+        data->oraclePollingTimerId = 0;
+    }
+    data->oracleInstaller.cancel();
+    data->editingDb.reset();
+    delete data;
+}
+
+static GtkWidget* buildConnectionDialog(ConnectionDialogData* data,
+                                        DatabaseType initialType = DatabaseType::SQLITE) {
+    GtkWidget* dialog = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(dialog), "Connect to Database");
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 500, -1);
+    gtk_window_set_resizable(GTK_WINDOW(dialog), FALSE);
+
+    data->dialog = dialog;
+
+    GtkWidget* mainBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_start(mainBox, 24);
+    gtk_widget_set_margin_end(mainBox, 24);
+    gtk_widget_set_margin_top(mainBox, 24);
+    gtk_widget_set_margin_bottom(mainBox, 24);
+
+    // Name row
+    data->nameEntry = makeEntry("Untitled connection");
+    gtk_editable_set_text(GTK_EDITABLE(data->nameEntry), "Untitled connection");
+    GtkWidget* nameRow = makeRow(makeLabel("Name"), data->nameEntry);
+    gtk_box_append(GTK_BOX(mainBox), nameRow);
+
+    // Type dropdown
+    static const char* typeNames[] = {"SQLite",  "PostgreSQL", "MySQL",  "MariaDB",  "Redis",
+                                      "MongoDB", "MSSQL",      "Oracle", "Redshift", "Cassandra"};
+    data->typeDropdown = makeStringDropdown(typeNames, 10, static_cast<int>(initialType));
+
+    // type icon next to dropdown
+    data->typeIcon = gtk_image_new();
+    gtk_widget_set_size_request(data->typeIcon, 24, 24);
+    updateTypeIcon(data->typeIcon, initialType);
+
+    GtkWidget* typeRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(typeRow), makeLabel("Type"));
+    gtk_box_append(GTK_BOX(typeRow), data->typeIcon);
+    gtk_box_append(GTK_BOX(typeRow), data->typeDropdown);
+    gtk_widget_set_hexpand(data->typeDropdown, TRUE);
+    gtk_box_append(GTK_BOX(mainBox), typeRow);
+
+    // URL row — bidirectionally sync'd with the form fields below.
+    data->urlEntry = makeEntry("postgresql://user:password@host:5432/dbname");
+    gtk_widget_set_hexpand(data->urlEntry, TRUE);
+    data->urlRow = makeRow(makeLabel("URL"), data->urlEntry);
+    gtk_box_append(GTK_BOX(mainBox), data->urlRow);
+
+    g_signal_connect(data->urlEntry, "changed", G_CALLBACK(+[](GObject*, gpointer ud) {
+                         applyUrlToForm(static_cast<ConnectionDialogData*>(ud));
+                     }),
+                     data);
+
+    data->urlErrorLabel = gtk_label_new("");
+    gtk_label_set_xalign(GTK_LABEL(data->urlErrorLabel), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(data->urlErrorLabel), TRUE);
+    gtk_widget_add_css_class(data->urlErrorLabel, "error");
+    gtk_widget_set_visible(data->urlErrorLabel, FALSE);
+    gtk_box_append(GTK_BOX(mainBox), data->urlErrorLabel);
+
+    // Separator
+    GtkWidget* sep1 = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_append(GTK_BOX(mainBox), sep1);
+
+    // Dynamic fields container — rebuilt per type.
+    data->fieldsBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_box_append(GTK_BOX(mainBox), data->fieldsBox);
+
+    // Type change handler
+    data->typeChangedHandlerId =
+        g_signal_connect(data->typeDropdown, "notify::selected",
+                         G_CALLBACK(+[](GtkDropDown*, GParamSpec*, gpointer ud) {
+                             auto* d = static_cast<ConnectionDialogData*>(ud);
+                             auto type = static_cast<DatabaseType>(
+                                 gtk_drop_down_get_selected(GTK_DROP_DOWN(d->typeDropdown)));
+                             updateTypeIcon(d->typeIcon, type);
+                             rebuildFieldsForType(d);
+                             gtk_label_set_text(GTK_LABEL(d->statusLabel), "");
+                         }),
+                         data);
+
+    // Status + spinner row
+    GtkWidget* statusRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    data->statusLabel = gtk_label_new("");
+    gtk_widget_set_hexpand(data->statusLabel, TRUE);
+    gtk_widget_set_halign(data->statusLabel, GTK_ALIGN_START);
+    gtk_label_set_wrap(GTK_LABEL(data->statusLabel), TRUE);
+    data->spinner = gtk_spinner_new();
+    gtk_box_append(GTK_BOX(statusRow), data->statusLabel);
+    gtk_box_append(GTK_BOX(statusRow), data->spinner);
+    gtk_box_append(GTK_BOX(mainBox), statusRow);
+
+    // Separator
+    GtkWidget* sep2 = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_append(GTK_BOX(mainBox), sep2);
+
+    // Button row
+    GtkWidget* btnRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(btnRow, GTK_ALIGN_END);
+
+    GtkWidget* cancelBtn = gtk_button_new_with_label("Cancel");
+    g_signal_connect(cancelBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer ud) {
+                         auto* d = static_cast<ConnectionDialogData*>(ud);
+                         gtk_window_destroy(GTK_WINDOW(d->dialog));
+                     }),
+                     data);
+
+    data->connectButton = gtk_button_new_with_label("Connect");
+    gtk_widget_add_css_class(data->connectButton, "suggested-action");
+    g_signal_connect(
+        data->connectButton, "clicked", G_CALLBACK(+[](GtkButton*, gpointer ud) {
+            auto* d = static_cast<ConnectionDialogData*>(ud);
+
+            const char* name = gtk_editable_get_text(GTK_EDITABLE(d->nameEntry));
+            if (!name || strlen(name) == 0) {
+                gtk_label_set_text(GTK_LABEL(d->statusLabel), "Please enter a connection name");
+                return;
+            }
+
+            if (d->editingConnectionId == -1 && !d->app->canAddConnection()) {
+                gtk_label_set_text(
+                    GTK_LABEL(d->statusLabel),
+                    "Connection limit reached (free tier: 3). Activate a license to add more.");
+                return;
+            }
+
+            int selectedType = gtk_drop_down_get_selected(GTK_DROP_DOWN(d->typeDropdown));
+            auto type = static_cast<DatabaseType>(selectedType);
+
+            if (type == DatabaseType::SQLITE) {
+                connectSQLite(d);
+            } else if (type == DatabaseType::ORACLE && !OracleClientInstaller::isInstalled() &&
+                       !d->oracleInstaller.isRunning()) {
+                // auto-install Oracle client, then connect after it finishes
+                d->oracleInstaller.startInstall();
+                gtk_widget_set_sensitive(d->connectButton, FALSE);
+                gtk_widget_set_sensitive(d->nameEntry, FALSE);
+                gtk_widget_set_sensitive(d->typeDropdown, FALSE);
+                gtk_widget_set_sensitive(d->fieldsBox, FALSE);
+                gtk_spinner_start(GTK_SPINNER(d->spinner));
+                gtk_label_set_text(GTK_LABEL(d->statusLabel),
+                                   "Installing Oracle Instant Client...");
+
+                if (!d->oraclePollingTimerId) {
+                    d->oraclePollingTimerId = g_timeout_add(
+                        200,
+                        +[](gpointer ud2) -> gboolean {
+                            auto* d2 = static_cast<ConnectionDialogData*>(ud2);
+                            d2->oracleInstaller.checkStatus();
+
+                            if (d2->oracleInstaller.isRunning()) {
+                                auto msg = d2->oracleInstaller.getStatusMessage();
+                                gtk_label_set_text(GTK_LABEL(d2->statusLabel), msg.c_str());
+                                return G_SOURCE_CONTINUE;
+                            }
+
+                            auto status = d2->oracleInstaller.getStatus();
+
+                            if (status == OracleClientInstaller::Status::Done) {
+                                gtk_label_set_text(GTK_LABEL(d2->statusLabel), "Connecting...");
+                                connectServerAsync(d2);
+                            } else if (status == OracleClientInstaller::Status::Failed) {
+                                gtk_spinner_stop(GTK_SPINNER(d2->spinner));
+                                gtk_label_set_text(GTK_LABEL(d2->statusLabel),
+                                                   d2->oracleInstaller.getError().c_str());
+                                gtk_widget_set_sensitive(d2->connectButton, TRUE);
+                                gtk_widget_set_sensitive(d2->nameEntry, TRUE);
+                                gtk_widget_set_sensitive(d2->typeDropdown,
+                                                         d2->editingConnectionId == -1);
+                                gtk_widget_set_sensitive(d2->fieldsBox, TRUE);
+                            }
+
+                            d2->oraclePollingTimerId = 0;
+                            return G_SOURCE_REMOVE;
+                        },
+                        d);
+                }
+            } else {
+                connectServerAsync(d);
+            }
+        }),
+        data);
+
+    gtk_box_append(GTK_BOX(btnRow), cancelBtn);
+    gtk_box_append(GTK_BOX(btnRow), data->connectButton);
+    gtk_box_append(GTK_BOX(mainBox), btnRow);
+
+    // defer setting the window child until presentation
+    data->contentBox = mainBox;
+
+    // Attach data and close/destroy handlers
+    g_object_set_data_full(G_OBJECT(dialog), "data", data, destroyConnectionDialogData);
+    g_signal_connect(dialog, "close-request", G_CALLBACK(+[](GtkWindow* win, gpointer) -> gboolean {
+                         auto* d = static_cast<ConnectionDialogData*>(
+                             g_object_get_data(G_OBJECT(win), "data"));
+                         if (d)
+                             d->cancelled = true;
+                         return FALSE;
+                     }),
+                     nullptr);
+    // Clear singleton on destroy (fires for both close-request and gtk_window_destroy)
+    g_signal_connect(dialog, "destroy",
+                     G_CALLBACK(+[](GtkWidget*, gpointer) { sActiveConnectionDialog = nullptr; }),
+                     nullptr);
+
+    // Build initial fields
+    rebuildFieldsForType(data);
+
+    return dialog;
+}
+
+static void populateFieldsFromConnection(ConnectionDialogData* data,
+                                         const std::shared_ptr<DatabaseInterface>& db) {
+    const auto& info = db->getConnectionInfo();
+
+    data->isPopulatingFields = true;
+
+    gtk_editable_set_text(GTK_EDITABLE(data->nameEntry), info.name.c_str());
+
+    guint currentType = gtk_drop_down_get_selected(GTK_DROP_DOWN(data->typeDropdown));
+    guint targetType = static_cast<guint>(info.type);
+    if (currentType != targetType) {
+        g_signal_handler_block(data->typeDropdown, data->typeChangedHandlerId);
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(data->typeDropdown), targetType);
+        rebuildFieldsForType(data);
+        g_signal_handler_unblock(data->typeDropdown, data->typeChangedHandlerId);
+    }
+
+    switch (info.type) {
+    case DatabaseType::SQLITE:
+        if (data->sqlitePathEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->sqlitePathEntry), info.path.c_str());
+        break;
+
+    case DatabaseType::POSTGRESQL:
+        if (data->hostEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->hostEntry), info.host.c_str());
+        if (data->portEntry) {
+            char portBuf[16];
+            snprintf(portBuf, sizeof(portBuf), "%d", info.port);
+            gtk_editable_set_text(GTK_EDITABLE(data->portEntry), portBuf);
+        }
+        if (data->databaseEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->databaseEntry), info.database.c_str());
+        if (data->showAllDbsCheck)
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(data->showAllDbsCheck),
+                                        info.showAllDatabases);
+        if (info.username.empty()) {
+            if (data->authNoneRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authNoneRadio), TRUE);
+        } else {
+            if (data->authPasswordRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authPasswordRadio), TRUE);
+            if (data->usernameEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->usernameEntry), info.username.c_str());
+            if (data->passwordEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->passwordEntry), info.password.c_str());
+        }
+        break;
+
+    case DatabaseType::MONGODB:
+        if (data->hostEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->hostEntry), info.host.c_str());
+        if (data->portEntry) {
+            char portBuf[16];
+            snprintf(portBuf, sizeof(portBuf), "%d", info.port);
+            gtk_editable_set_text(GTK_EDITABLE(data->portEntry), portBuf);
+        }
+        if (data->databaseEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->databaseEntry), info.database.c_str());
+        if (data->mongoOptionsEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->mongoOptionsEntry),
+                                  info.mongoOptions.c_str());
+        if (data->showAllDbsCheck)
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(data->showAllDbsCheck),
+                                        info.showAllDatabases);
+        if (info.username.empty() && info.password.empty()) {
+            if (data->authNoneRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authNoneRadio), TRUE);
+        } else {
+            if (data->authPasswordRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authPasswordRadio), TRUE);
+            if (data->usernameEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->usernameEntry), info.username.c_str());
+            if (data->passwordEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->passwordEntry), info.password.c_str());
+        }
+        break;
+
+    case DatabaseType::MYSQL:
+    case DatabaseType::MARIADB:
+    case DatabaseType::MSSQL:
+    case DatabaseType::ORACLE:
+    case DatabaseType::REDSHIFT:
+    case DatabaseType::CASSANDRA:
+        if (data->hostEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->hostEntry), info.host.c_str());
+        if (data->portEntry) {
+            char portBuf[16];
+            snprintf(portBuf, sizeof(portBuf), "%d", info.port);
+            gtk_editable_set_text(GTK_EDITABLE(data->portEntry), portBuf);
+        }
+        if (data->databaseEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->databaseEntry), info.database.c_str());
+        if (data->showAllDbsCheck)
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(data->showAllDbsCheck),
+                                        info.showAllDatabases);
+        if (info.username.empty() && info.password.empty()) {
+            if (data->authNoneRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authNoneRadio), TRUE);
+        } else {
+            if (data->authPasswordRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authPasswordRadio), TRUE);
+            if (data->usernameEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->usernameEntry), info.username.c_str());
+            if (data->passwordEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->passwordEntry), info.password.c_str());
+        }
+        break;
+
+    case DatabaseType::REDIS:
+        if (data->hostEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->hostEntry), info.host.c_str());
+        if (data->portEntry) {
+            char portBuf[16];
+            snprintf(portBuf, sizeof(portBuf), "%d", info.port);
+            gtk_editable_set_text(GTK_EDITABLE(data->portEntry), portBuf);
+        }
+        if (info.username.empty() && info.password.empty()) {
+            if (data->authNoneRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authNoneRadio), TRUE);
+        } else {
+            if (data->authPasswordRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->authPasswordRadio), TRUE);
+            if (data->usernameEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->usernameEntry), info.username.c_str());
+            if (data->passwordEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->passwordEntry), info.password.c_str());
+        }
+        break;
+    }
+
+    // Restore SSL mode (all server types)
+    if (info.type != DatabaseType::SQLITE && data->sslModeDropdown) {
+        auto sslCfg = getSslConfig(info.type);
+        for (int i = 0; i < sslCfg.count; i++) {
+            if (info.sslmode == sslCfg.values[i]) {
+                gtk_drop_down_set_selected(GTK_DROP_DOWN(data->sslModeDropdown), i);
+                break;
+            }
+        }
+        if (data->sslCACertPathEntry && !info.sslCACertPath.empty())
+            gtk_editable_set_text(GTK_EDITABLE(data->sslCACertPathEntry),
+                                  info.sslCACertPath.c_str());
+    }
+
+    // Restore SSH tunnel fields (all server types)
+    if (info.type != DatabaseType::SQLITE && info.ssh.enabled) {
+        if (data->sshEnabledCheck)
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(data->sshEnabledCheck), TRUE);
+        if (data->sshHostEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->sshHostEntry), info.ssh.host.c_str());
+        if (data->sshPortEntry) {
+            char portBuf[16];
+            snprintf(portBuf, sizeof(portBuf), "%d", info.ssh.port);
+            gtk_editable_set_text(GTK_EDITABLE(data->sshPortEntry), portBuf);
+        }
+        if (data->sshUsernameEntry)
+            gtk_editable_set_text(GTK_EDITABLE(data->sshUsernameEntry), info.ssh.username.c_str());
+        if (info.ssh.authMethod == SSHAuthMethod::PrivateKey) {
+            if (data->sshAuthKeyRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->sshAuthKeyRadio), TRUE);
+            if (data->sshKeyPathEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->sshKeyPathEntry),
+                                      info.ssh.privateKeyPath.c_str());
+        } else {
+            if (data->sshAuthPasswordRadio)
+                gtk_check_button_set_active(GTK_CHECK_BUTTON(data->sshAuthPasswordRadio), TRUE);
+            if (data->sshPasswordEntry)
+                gtk_editable_set_text(GTK_EDITABLE(data->sshPasswordEntry),
+                                      info.ssh.password.c_str());
+        }
+    }
+
+    data->isPopulatingFields = false;
+    refreshDynamicFieldState(data);
+}
+
+static void destroyCreateDbDialogData(gpointer ptr) {
+    auto* data = static_cast<CreateDatabaseDialogData*>(ptr);
+    data->db.reset();
+    delete data;
+}
+
+struct PgOptionsResult {
+    std::vector<std::string> owners;
+    int defaultOwnerIdx = 0;
+    std::vector<std::string> templates;
+    std::vector<std::string> tablespaces;
+    CreateDatabaseDialogData* data = nullptr;
+};
+
+static void applyPgOptions(PgOptionsResult* result) {
+    auto* data = result->data;
+
+    if (data->ownerDropdown) {
+        auto* model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->ownerDropdown)));
+        while (g_list_model_get_n_items(G_LIST_MODEL(model)) > 0)
+            gtk_string_list_remove(model, 0);
+        for (const auto& name : result->owners)
+            gtk_string_list_append(model, name.c_str());
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(data->ownerDropdown), result->defaultOwnerIdx);
+        gtk_widget_set_sensitive(data->ownerDropdown, TRUE);
+    }
+
+    if (data->templateDropdown) {
+        auto* model =
+            GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->templateDropdown)));
+        while (g_list_model_get_n_items(G_LIST_MODEL(model)) > 0)
+            gtk_string_list_remove(model, 0);
+        for (const auto& name : result->templates)
+            gtk_string_list_append(model, name.c_str());
+        gtk_widget_set_sensitive(data->templateDropdown, TRUE);
+    }
+
+    if (data->tablespaceDropdown) {
+        auto* model =
+            GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->tablespaceDropdown)));
+        while (g_list_model_get_n_items(G_LIST_MODEL(model)) > 0)
+            gtk_string_list_remove(model, 0);
+        for (const auto& name : result->tablespaces)
+            gtk_string_list_append(model, name.c_str());
+        gtk_widget_set_sensitive(data->tablespaceDropdown, TRUE);
+    }
+
+    if (data->pgOptionsSpinnerRow)
+        gtk_widget_set_visible(data->pgOptionsSpinnerRow, FALSE);
+
+    data->pgOptionsLoading = false;
+    delete result;
+}
+
+static void populatePostgresOptions(CreateDatabaseDialogData* data) {
+    if (!data->db)
+        return;
+
+    data->pgOptionsLoading = true;
+    gtk_widget_set_sensitive(data->ownerDropdown, FALSE);
+    gtk_widget_set_sensitive(data->templateDropdown, FALSE);
+    gtk_widget_set_sensitive(data->tablespaceDropdown, FALSE);
+    if (data->pgOptionsSpinnerRow) {
+        gtk_widget_set_visible(data->pgOptionsSpinnerRow, TRUE);
+        GtkWidget* spinner = gtk_widget_get_first_child(data->pgOptionsSpinnerRow);
+        if (spinner)
+            gtk_spinner_start(GTK_SPINNER(spinner));
+    }
+
+    auto db = data->db;
+    std::thread([data, db]() {
+        auto* result = new PgOptionsResult();
+        result->data = data;
+
+        auto* executor = dynamic_cast<IQueryExecutor*>(db.get());
+        if (!executor) {
+            g_idle_add(
+                +[](gpointer ud) -> gboolean {
+                    auto* r = static_cast<PgOptionsResult*>(ud);
+                    if (r->data->pgOptionsSpinnerRow)
+                        gtk_widget_set_visible(r->data->pgOptionsSpinnerRow, FALSE);
+                    r->data->pgOptionsLoading = false;
+                    delete r;
+                    return G_SOURCE_REMOVE;
+                },
+                result);
+            return;
+        }
+
+        // owners
+        try {
+            auto qr = executor->executeQuery("SELECT rolname FROM pg_roles ORDER BY rolname");
+            if (qr.success()) {
+                int idx = 0;
+                for (const auto& row : qr[0].tableData) {
+                    if (!row.empty()) {
+                        result->owners.push_back(row[0]);
+                        if (row[0] == "postgres")
+                            result->defaultOwnerIdx = idx;
+                        idx++;
+                    }
+                }
+            }
+        } catch (...) {
+        }
+
+        // templates
+        try {
+            auto qr = executor->executeQuery(
+                "SELECT datname FROM pg_database WHERE datistemplate ORDER BY datname");
+            if (qr.success()) {
+                result->templates.push_back("template1");
+                for (const auto& row : qr[0].tableData) {
+                    if (!row.empty() && row[0] != "template1")
+                        result->templates.push_back(row[0]);
+                }
+            }
+        } catch (...) {
+        }
+
+        // tablespaces
+        try {
+            auto qr = executor->executeQuery("SELECT spcname FROM pg_tablespace ORDER BY spcname");
+            if (qr.success()) {
+                for (const auto& row : qr[0].tableData) {
+                    if (!row.empty())
+                        result->tablespaces.push_back(row[0]);
+                }
+            }
+        } catch (...) {
+        }
+
+        g_idle_add(
+            +[](gpointer ud) -> gboolean {
+                auto* r = static_cast<PgOptionsResult*>(ud);
+                applyPgOptions(r);
+                return G_SOURCE_REMOVE;
+            },
+            result);
+    }).detach();
+}
+
+static void updateCollationForCharset(CreateDatabaseDialogData* data) {
+    if (!data->charsetDropdown || !data->collationDropdown)
+        return;
+
+    guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(data->charsetDropdown));
+    auto* charsetModel =
+        GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->charsetDropdown)));
+    const char* charset = gtk_string_list_get_string(charsetModel, idx);
+
+    auto* model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(data->collationDropdown)));
+    while (g_list_model_get_n_items(G_LIST_MODEL(model)) > 0)
+        gtk_string_list_remove(model, 0);
+
+    if (!charset)
+        return;
+
+    if (strcmp(charset, "utf8mb4") == 0) {
+        for (auto c :
+             {"utf8mb4_unicode_ci", "utf8mb4_0900_ai_ci", "utf8mb4_general_ci", "utf8mb4_bin"})
+            gtk_string_list_append(model, c);
+    } else if (strcmp(charset, "utf8mb3") == 0 || strcmp(charset, "utf8") == 0) {
+        for (auto c : {"utf8_unicode_ci", "utf8_general_ci", "utf8_bin"})
+            gtk_string_list_append(model, c);
+    } else if (strcmp(charset, "latin1") == 0) {
+        for (auto c : {"latin1_swedish_ci", "latin1_general_ci", "latin1_bin"})
+            gtk_string_list_append(model, c);
+    } else if (strcmp(charset, "ascii") == 0) {
+        for (auto c : {"ascii_general_ci", "ascii_bin"})
+            gtk_string_list_append(model, c);
+    } else if (strcmp(charset, "binary") == 0) {
+        gtk_string_list_append(model, "binary");
+    }
+}
+
+static GtkWidget* buildCreateDatabaseDialog(CreateDatabaseDialogData* data) {
+    DatabaseType type = data->db->getConnectionInfo().type;
+    bool isPostgres = (type == DatabaseType::POSTGRESQL);
+
+    GtkWidget* dialog = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(dialog),
+                         isPostgres ? "Create PostgreSQL Database" : "Create MySQL Database");
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 450, -1);
+    gtk_window_set_resizable(GTK_WINDOW(dialog), FALSE);
+
+    GtkWidget* parent = getParentWindow(data->app);
+    if (parent) {
+        gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(parent));
+    }
+
+    data->dialog = dialog;
+
+    GtkWidget* mainBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_start(mainBox, 24);
+    gtk_widget_set_margin_end(mainBox, 24);
+    gtk_widget_set_margin_top(mainBox, 24);
+    gtk_widget_set_margin_bottom(mainBox, 24);
+
+    // Name
+    data->nameEntry = makeEntry("new_database");
+    gtk_box_append(GTK_BOX(mainBox), makeRow(makeLabel("Name"), data->nameEntry));
+
+    if (isPostgres) {
+        // Owner
+        static const char* defOwner[] = {"postgres"};
+        data->ownerDropdown = makeStringDropdown(defOwner, 1, 0);
+        gtk_widget_set_hexpand(data->ownerDropdown, TRUE);
+        gtk_box_append(GTK_BOX(mainBox), makeRow(makeLabel("Owner"), data->ownerDropdown));
+
+        // Template
+        static const char* defTemplate[] = {"template1", "template0"};
+        data->templateDropdown = makeStringDropdown(defTemplate, 2, 0);
+        gtk_widget_set_hexpand(data->templateDropdown, TRUE);
+        gtk_box_append(GTK_BOX(mainBox), makeRow(makeLabel("Template"), data->templateDropdown));
+
+        // Encoding
+        static const char* encodings[] = {"UTF8",      "LATIN1",  "LATIN2",    "LATIN9", "WIN1252",
+                                          "SQL_ASCII", "EUC_JP",  "EUC_KR",    "EUC_CN", "SJIS",
+                                          "BIG5",      "WIN1251", "ISO_8859_5"};
+        data->encodingDropdown = makeStringDropdown(encodings, 13, 0);
+        gtk_widget_set_hexpand(data->encodingDropdown, TRUE);
+        gtk_box_append(GTK_BOX(mainBox), makeRow(makeLabel("Encoding"), data->encodingDropdown));
+
+        // Tablespace
+        static const char* defTs[] = {"pg_default"};
+        data->tablespaceDropdown = makeStringDropdown(defTs, 1, 0);
+        gtk_widget_set_hexpand(data->tablespaceDropdown, TRUE);
+        gtk_box_append(GTK_BOX(mainBox),
+                       makeRow(makeLabel("Tablespace"), data->tablespaceDropdown));
+
+        // loading spinner for async option fetch
+        data->pgOptionsSpinnerRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_widget_set_halign(data->pgOptionsSpinnerRow, GTK_ALIGN_CENTER);
+        GtkWidget* pgSpinner = gtk_spinner_new();
+        gtk_box_append(GTK_BOX(data->pgOptionsSpinnerRow), pgSpinner);
+        GtkWidget* loadingLabel = gtk_label_new("Loading options...");
+        gtk_widget_add_css_class(loadingLabel, "dim-label");
+        gtk_box_append(GTK_BOX(data->pgOptionsSpinnerRow), loadingLabel);
+        gtk_box_append(GTK_BOX(mainBox), data->pgOptionsSpinnerRow);
+
+        populatePostgresOptions(data);
+    } else {
+        // MySQL: Charset
+        static const char* charsets[] = {"utf8mb4", "utf8mb3", "utf8",  "latin1", "ascii",
+                                         "binary",  "utf16",   "utf32", "cp1251", "gbk",
+                                         "big5",    "euckr",   "sjis"};
+        data->charsetDropdown = makeStringDropdown(charsets, 13, 0);
+        gtk_widget_set_hexpand(data->charsetDropdown, TRUE);
+        gtk_box_append(GTK_BOX(mainBox), makeRow(makeLabel("Charset"), data->charsetDropdown));
+
+        // Collation
+        static const char* defCollations[] = {"utf8mb4_unicode_ci", "utf8mb4_0900_ai_ci",
+                                              "utf8mb4_general_ci", "utf8mb4_bin"};
+        data->collationDropdown = makeStringDropdown(defCollations, 4, 0);
+        gtk_widget_set_hexpand(data->collationDropdown, TRUE);
+        gtk_box_append(GTK_BOX(mainBox), makeRow(makeLabel("Collation"), data->collationDropdown));
+
+        // Charset change updates collation
+        g_signal_connect(data->charsetDropdown, "notify::selected",
+                         G_CALLBACK(+[](GtkDropDown*, GParamSpec*, gpointer ud) {
+                             updateCollationForCharset(static_cast<CreateDatabaseDialogData*>(ud));
+                         }),
+                         data);
+    }
+
+    // Comment
+    data->commentEntry = makeEntry("(optional)");
+    gtk_box_append(GTK_BOX(mainBox), makeRow(makeLabel("Comment"), data->commentEntry));
+
+    // Status + spinner
+    GtkWidget* statusRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    data->statusLabel = gtk_label_new("");
+    gtk_widget_set_hexpand(data->statusLabel, TRUE);
+    gtk_widget_set_halign(data->statusLabel, GTK_ALIGN_START);
+    data->spinner = gtk_spinner_new();
+    gtk_box_append(GTK_BOX(statusRow), data->statusLabel);
+    gtk_box_append(GTK_BOX(statusRow), data->spinner);
+    gtk_box_append(GTK_BOX(mainBox), statusRow);
+
+    // Separator
+    gtk_box_append(GTK_BOX(mainBox), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+
+    // Buttons
+    GtkWidget* btnRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(btnRow, GTK_ALIGN_END);
+
+    GtkWidget* cancelBtn = gtk_button_new_with_label("Cancel");
+    g_signal_connect(cancelBtn, "clicked", G_CALLBACK(+[](GtkButton*, gpointer ud) {
+                         auto* d = static_cast<CreateDatabaseDialogData*>(ud);
+                         gtk_window_destroy(GTK_WINDOW(d->dialog));
+                     }),
+                     data);
+
+    data->createButton = gtk_button_new_with_label("Create");
+    gtk_widget_add_css_class(data->createButton, "suggested-action");
+
+    g_signal_connect(
+        data->createButton, "clicked", G_CALLBACK(+[](GtkButton*, gpointer ud) {
+            auto* data = static_cast<CreateDatabaseDialogData*>(ud);
+
+            const char* name = gtk_editable_get_text(GTK_EDITABLE(data->nameEntry));
+            if (!name || strlen(name) == 0) {
+                gtk_label_set_text(GTK_LABEL(data->statusLabel), "Please enter a database name");
+                return;
+            }
+
+            gtk_widget_set_sensitive(data->createButton, FALSE);
+            gtk_spinner_start(GTK_SPINNER(data->spinner));
+            gtk_label_set_text(GTK_LABEL(data->statusLabel), "Creating...");
+
+            CreateDatabaseOptions opts;
+            opts.name = name;
+            const char* comment = gtk_editable_get_text(GTK_EDITABLE(data->commentEntry));
+            opts.comment = comment ? comment : "";
+
+            auto getDropdownText = [](GtkWidget* dd) -> std::string {
+                if (!dd)
+                    return "";
+                guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(dd));
+                auto* model = GTK_STRING_LIST(gtk_drop_down_get_model(GTK_DROP_DOWN(dd)));
+                const char* s = gtk_string_list_get_string(model, idx);
+                return s ? s : "";
+            };
+
+            DatabaseType type = data->db->getConnectionInfo().type;
+            if (type == DatabaseType::POSTGRESQL) {
+                opts.owner = getDropdownText(data->ownerDropdown);
+                opts.templateDb = getDropdownText(data->templateDropdown);
+                opts.encoding = getDropdownText(data->encodingDropdown);
+                opts.tablespace = getDropdownText(data->tablespaceDropdown);
+            } else {
+                opts.charset = getDropdownText(data->charsetDropdown);
+                opts.collation = getDropdownText(data->collationDropdown);
+            }
+
+            auto dbCopy = data->db;
+            GtkWidget* dialogRef = data->dialog;
+            (void)g_object_ref(dialogRef);
+
+            std::thread([=]() {
+                auto result = dbCopy->createDatabaseWithOptions(opts);
+                bool ok = result.first;
+                std::string errMsg = result.second;
+
+                struct CreateResult {
+                    GtkWidget* dialogRef;
+                    bool ok;
+                    std::string error;
+                    std::shared_ptr<DatabaseInterface> db;
+                };
+
+                auto* cr = new CreateResult{dialogRef, ok, errMsg, dbCopy};
+
+                g_idle_add(
+                    +[](gpointer p) -> gboolean {
+                        auto* cr = static_cast<CreateResult*>(p);
+                        auto* d = static_cast<CreateDatabaseDialogData*>(
+                            g_object_get_data(G_OBJECT(cr->dialogRef), "data"));
+
+                        if (cr->ok) {
+                            if (auto* pgDb = dynamic_cast<PostgresDatabase*>(cr->db.get())) {
+                                pgDb->refreshDatabaseNames();
+                            } else if (auto* myDb = dynamic_cast<MySQLDatabase*>(cr->db.get())) {
+                                myDb->refreshDatabaseNames();
+                            }
+                            gtk_window_destroy(GTK_WINDOW(cr->dialogRef));
+                        } else if (d) {
+                            gtk_label_set_text(GTK_LABEL(d->statusLabel),
+                                               ("Failed: " + cr->error).c_str());
+                            gtk_widget_set_sensitive(d->createButton, TRUE);
+                            gtk_spinner_stop(GTK_SPINNER(d->spinner));
+                        }
+
+                        g_object_unref(cr->dialogRef);
+                        delete cr;
+                        return G_SOURCE_REMOVE;
+                    },
+                    cr);
+            }).detach();
+        }),
+        data);
+
+    gtk_box_append(GTK_BOX(btnRow), cancelBtn);
+    gtk_box_append(GTK_BOX(btnRow), data->createButton);
+    gtk_box_append(GTK_BOX(mainBox), btnRow);
+
+    gtk_window_set_child(GTK_WINDOW(dialog), mainBox);
+
+    g_object_set_data_full(G_OBJECT(dialog), "data", data, destroyCreateDbDialogData);
+    // Clear singleton on destroy (fires for both close-request and gtk_window_destroy)
+    g_signal_connect(
+        dialog, "destroy",
+        G_CALLBACK(+[](GtkWidget*, gpointer) { sActiveCreateDatabaseDialog = nullptr; }), nullptr);
+
+    return dialog;
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+void showConnectionDialog(Application* app) {
+    if (sActiveConnectionDialog) {
+        gtk_window_present(GTK_WINDOW(sActiveConnectionDialog));
+        return;
+    }
+    auto* data = new ConnectionDialogData();
+    data->app = app;
+    GtkWidget* dialog = buildConnectionDialog(data, DatabaseType::SQLITE);
+    rebuildUrlFromForm(data);
+    sActiveConnectionDialog = dialog;
+    presentConnectionDialogDeferred(data);
+}
+
+void showEditConnectionDialog(Application* app, std::shared_ptr<DatabaseInterface> db) {
+    if (sActiveConnectionDialog) {
+        gtk_window_present(GTK_WINDOW(sActiveConnectionDialog));
+        return;
+    }
+    auto* data = new ConnectionDialogData();
+    data->app = app;
+    data->editingDb = db;
+    data->editingConnectionId = db->getConnectionId();
+    GtkWidget* dialog = buildConnectionDialog(data, db->getConnectionInfo().type);
+
+    populateFieldsFromConnection(data, db);
+    rebuildUrlFromForm(data);
+    gtk_widget_set_sensitive(data->typeDropdown, FALSE);
+    gtk_window_set_title(GTK_WINDOW(dialog), "Edit Connection");
+    gtk_button_set_label(GTK_BUTTON(data->connectButton), "Update");
+
+    sActiveConnectionDialog = dialog;
+    presentConnectionDialogDeferred(data);
+}
+
+void showCreateDatabaseDialog(Application* app, std::shared_ptr<DatabaseInterface> db) {
+    if (sActiveCreateDatabaseDialog) {
+        gtk_window_present(GTK_WINDOW(sActiveCreateDatabaseDialog));
+        return;
+    }
+    auto* data = new CreateDatabaseDialogData();
+    data->app = app;
+    data->db = db;
+    GtkWidget* dialog = buildCreateDatabaseDialog(data);
+    sActiveCreateDatabaseDialog = dialog;
+
+    // defer to next main loop iteration so the ImGui popup closes cleanly first
+    g_object_ref(dialog);
+    g_idle_add(
+        +[](gpointer ud) -> gboolean {
+            auto* dlg = static_cast<GtkWidget*>(ud);
+            gtk_window_present(GTK_WINDOW(dlg));
+            g_object_unref(dlg);
+            return G_SOURCE_REMOVE;
+        },
+        dialog);
+}
+
+#endif // defined(__linux__)
