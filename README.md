@@ -24,7 +24,7 @@ Download pre-built binaries from [GitHub Releases](https://github.com/sonnam0904
 | Platform | File | How to run |
 |----------|------|------------|
 | Linux (x86_64) | `SQLEditor-x86_64.AppImage` | `chmod +x SQLEditor-x86_64.AppImage && ./SQLEditor-x86_64.AppImage` |
-
+ 
 ### Troubleshooting on Linux
 
 SQLEditor uses GTK4 + OpenGL (`GtkGLArea`). If the app fails to open a window, exits immediately, or reports an OpenGL context error, try the steps below.
