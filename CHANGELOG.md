@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/sonnam0904/sqleditor/compare/v1.0.0...v1.0.1) (2026-06-11)
+
+### Bug Fixes
+
+* auto build exe ([0cbb4a4](https://github.com/sonnam0904/sqleditor/commit/0cbb4a46ed6e02a434a0be4c8807b27c75aee950))
+* update doc ([597c9b7](https://github.com/sonnam0904/sqleditor/commit/597c9b72326a0d5e1b9fe3c5fda0177d726eb82c))
+
 ## 1.0.0 (2026-06-11)
 
 ### Features
