@@ -21,10 +21,11 @@
 
 Download pre-built binaries from [GitHub Releases](https://github.com/sonnam0904/sqleditor/releases).
 
-| Platform | File |
-|----------|------|
-| Linux (x86_64) | `SQLEditor-x86_64.AppImage` |
-| Windows (x64) | `SQLEditor-x64.msi` |
+| Platform | File | Cách chạy |
+|----------|------|-----------|
+| Linux (x86_64) | `SQLEditor-x86_64.AppImage` | `chmod +x SQLEditor-x86_64.AppImage && ./SQLEditor-x86_64.AppImage` |
+
+
  
 ## Build from source
 

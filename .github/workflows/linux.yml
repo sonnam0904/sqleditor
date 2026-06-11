@@ -8,6 +8,7 @@ permissions:
 
 env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -15,12 +16,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Export GitHub Actions cache env
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -42,7 +43,7 @@ jobs:
           vcpkgGitCommitId: "77df67cfff9c12ccfdb52284e07c87c75092f723"
 
       - name: Cache vcpkg installed packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build_release/vcpkg_installed
           key: vcpkg-installed-linux-${{ hashFiles('vcpkg.json') }}-0a434205
@@ -97,10 +98,9 @@ jobs:
           echo "Created ${METADATA_PATH}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: sqleditor-linux-appimage
           path: |
             build_release/${{ env.APPIMAGE_NAME }}
             build_release/${{ env.VERSION_METADATA_NAME }}
-

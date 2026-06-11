@@ -7,8 +7,8 @@ permissions:
   contents: read
 
 env:
-  # x-gha shares vcpkg binary cache with the Build Linux workflow
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test:
@@ -17,12 +17,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Export GitHub Actions cache env
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -44,10 +44,8 @@ jobs:
         with:
           vcpkgGitCommitId: "77df67cfff9c12ccfdb52284e07c87c75092f723"
 
-      # Test build dir differs from release (build vs build_release), so this
-      # cache is keyed separately. The shared win is x-gha vcpkg binary cache.
       - name: Cache vcpkg installed packages (test)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/vcpkg_installed
           key: vcpkg-installed-linux-test-${{ hashFiles('vcpkg.json') }}
@@ -64,13 +62,9 @@ jobs:
       - name: Run tests
         env:
           CMAKE_GENERATOR: Ninja
-          # ensure each test prints [ RUN ] / [ OK ] lines unbuffered so a
-          # hang shows the last-running test in the GitHub Actions log
           GTEST_COLOR: "no"
           GTEST_PRINT_TIME: "1"
         run: |
-          # 30-min wall-clock cap per test binary so a single hung test
-          # cannot silently consume the whole job timeout
           stdbuf -oL -eL timeout --foreground 30m ./scripts/run-tests
 
       - name: Dump container logs on failure

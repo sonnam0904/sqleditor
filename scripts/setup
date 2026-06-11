@@ -39,11 +39,8 @@ install_dependencies() {
                 freetds-dev \
                 libgnutls28-dev \
                 libkrb5-dev \
+                libnvidia-egl-gbm1 \
                 unzip
-            # GTK4 GtkGLArea needs EGL+GBM on NVIDIA; without this, OpenGL context creation fails
-            if apt-cache show libnvidia-egl-gbm1 &>/dev/null; then
-                sudo apt install -y libnvidia-egl-gbm1
-            fi
         elif command -v dnf &> /dev/null; then
             echo "Installing Fedora dependencies..."
             sudo dnf install -y \

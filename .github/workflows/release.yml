@@ -21,6 +21,7 @@ concurrency:
 
 env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   semantic-release:
@@ -33,15 +34,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           submodules: recursive
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - name: Install semantic-release
@@ -67,7 +68,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Decide release plan
         id: plan
@@ -104,13 +105,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.plan-release.outputs.checkout_ref }}
           submodules: recursive
 
       - name: Export GitHub Actions cache env
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -132,7 +133,7 @@ jobs:
           vcpkgGitCommitId: "77df67cfff9c12ccfdb52284e07c87c75092f723"
 
       - name: Cache vcpkg installed packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build_release/vcpkg_installed
           key: vcpkg-installed-linux-${{ hashFiles('vcpkg.json') }}-0a434205
@@ -161,92 +162,21 @@ jobs:
           echo "${APPIMAGE_NAME}" > release-artifacts/linux-appimage-name.txt
 
       - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: sqleditor-linux
           path: release-artifacts/
           retention-days: 14
 
-  build-windows:
-    name: Build Windows
-    needs: plan-release
-    if: needs.plan-release.outputs.should_build == 'true'
-    runs-on: windows-2022
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.plan-release.outputs.checkout_ref }}
-          submodules: recursive
-
-      - name: Export GitHub Actions cache env
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
-
-      - name: Install gperf
-        shell: pwsh
-        run: choco install gperf --version=3.1 -y --no-progress
-
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: "77df67cfff9c12ccfdb52284e07c87c75092f723"
-
-      - name: Cache vcpkg installed packages
-        uses: actions/cache@v4
-        with:
-          path: build_release/vcpkg_installed
-          key: vcpkg-installed-windows-${{ hashFiles('vcpkg.json') }}-ca6170b7
-          restore-keys: |
-            vcpkg-installed-windows-
-
-      - name: Inject secrets into APP_METADATA
-        run: |
-          Add-Content APP_METADATA "SENTRY_DSN=${{ secrets.SENTRY_DSN }}"
-          Add-Content APP_METADATA "POLAR_ORGANIZATION_ID=${{ secrets.POLAR_ORGANIZATION_ID }}"
-          Add-Content APP_METADATA "CREDS_SECRET=${{ secrets.CREDS_SECRET }}"
-
-      - name: Build and package
-        run: .\scripts\build-msi.ps1
-
-      - name: Prepare Windows artifacts
-        shell: pwsh
-        run: |
-          $appName = ((Select-String -Path APP_METADATA -Pattern '^APP_NAME=').Line -split '=', 2)[1]
-          $msiName = "$appName-x64.msi"
-          & "$PWD\scripts\package-windows-portable.ps1"
-          $zipName = "$appName-windows-x64-portable.zip"
-          New-Item -ItemType Directory -Force -Path release-artifacts | Out-Null
-          Copy-Item "build_release/$msiName" "release-artifacts/"
-          Copy-Item "build_release/$zipName" "release-artifacts/"
-          Set-Content -Path release-artifacts/windows-msi-name.txt -Value $msiName
-          Set-Content -Path release-artifacts/windows-zip-name.txt -Value $zipName
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sqleditor-windows
-          path: release-artifacts/
-          retention-days: 14
-
   publish-release:
     name: Publish GitHub Release
-    needs: [plan-release, build-linux, build-windows]
+    needs: [plan-release, build-linux]
     if: needs.plan-release.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.plan-release.outputs.checkout_ref }}
 
@@ -263,39 +193,26 @@ jobs:
             cat > release-notes.md <<'EOF'
           ## Downloads
 
-          Pre-built executables — no compilation required.
+          Pre-built Linux executable — no compilation required.
 
-          ### Linux (x86_64)
           1. Download `SQLEditor-x86_64.AppImage`
           2. Run:
           ```sh
           chmod +x SQLEditor-x86_64.AppImage
           ./SQLEditor-x86_64.AppImage
           ```
-
-          ### Windows (x64)
-          - **Portable:** unzip `SQLEditor-windows-x64-portable.zip` and run `SQLEditor.exe`
-          - **Installer:** run `SQLEditor-x64.msi`
           EOF
           fi
 
       - name: Download Linux artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: sqleditor-linux
           path: artifacts/linux
 
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: sqleditor-windows
-          path: artifacts/windows
-
       - name: Create version metadata
         run: |
           APPIMAGE_NAME=$(cat artifacts/linux/linux-appimage-name.txt)
-          MSI_NAME=$(cat artifacts/windows/windows-msi-name.txt)
-          ZIP_NAME=$(cat artifacts/windows/windows-zip-name.txt)
           SHA256=$(cut -d' ' -f1 "artifacts/linux/${APPIMAGE_NAME}.sha256")
           TAG="${{ needs.plan-release.outputs.release_tag }}"
           VERSION="${{ needs.plan-release.outputs.release_version }}"
@@ -309,14 +226,6 @@ jobs:
                 "file": "${APPIMAGE_NAME}",
                 "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${APPIMAGE_NAME}",
                 "sha256": "${SHA256}"
-              },
-              "windows-portable-x64": {
-                "file": "${ZIP_NAME}",
-                "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ZIP_NAME}"
-              },
-              "windows-installer-x64": {
-                "file": "${MSI_NAME}",
-                "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${MSI_NAME}"
               }
             }
           }
@@ -325,13 +234,9 @@ jobs:
       - name: Stage release files
         run: |
           APPIMAGE_NAME=$(cat artifacts/linux/linux-appimage-name.txt)
-          MSI_NAME=$(cat artifacts/windows/windows-msi-name.txt)
-          ZIP_NAME=$(cat artifacts/windows/windows-zip-name.txt)
           mkdir -p release-upload
           cp "artifacts/linux/${APPIMAGE_NAME}" release-upload/
           cp "artifacts/linux/${APPIMAGE_NAME}.sha256" release-upload/
-          cp "artifacts/windows/${MSI_NAME}" release-upload/
-          cp "artifacts/windows/${ZIP_NAME}" release-upload/
           cp artifacts/version.json release-upload/
 
       - name: Publish GitHub Release
