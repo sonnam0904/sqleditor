@@ -58,6 +58,8 @@ fi
 # ---- AppImage packaging ----
 LINUXDEPLOY="$BUILD_DIR/linuxdeploy-x86_64.AppImage"
 LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+GTK_PLUGIN="$BUILD_DIR/linuxdeploy-plugin-gtk.sh"
+GTK_PLUGIN_URL="https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh"
 
 # bundle the newer type2-runtime instead of the default one shipped by
 # linuxdeploy. the old runtime segfaults on modern Arch / FUSE3 systems
@@ -70,6 +72,12 @@ if [[ ! -x "$LINUXDEPLOY" ]]; then
     echo "Downloading linuxdeploy..."
     curl -fSL -o "$LINUXDEPLOY" "$LINUXDEPLOY_URL"
     chmod +x "$LINUXDEPLOY"
+fi
+
+if [[ ! -x "$GTK_PLUGIN" ]]; then
+    echo "Downloading linuxdeploy GTK plugin..."
+    curl -fSL -o "$GTK_PLUGIN" "$GTK_PLUGIN_URL"
+    chmod +x "$GTK_PLUGIN"
 fi
 
 if [[ ! -f "$RUNTIME_FILE" ]]; then
@@ -94,11 +102,19 @@ install -m644 "$ROOT_DIR/packaging/$APP_IDENTIFIER.desktop" \
 install -m644 "$ROOT_DIR/assets/appicon.png" \
     "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP_IDENTIFIER.png"
 
+# GTK plugin bundles libgtk-4, GLib schemas, gdk-pixbuf loaders, immodules, etc.
+# Without it, linuxdeploy only copies direct ldd deps and the AppImage is tiny
+# (~20–30 MB) but missing libraries needed on other distros.
+export DEPLOY_GTK_VERSION=4
+export PATH="$(dirname "$GTK_PLUGIN"):$PATH"
+
 OUTPUT="$APPIMAGE_FILE" LDAI_RUNTIME_FILE="$RUNTIME_FILE" "$LINUXDEPLOY" \
     --appdir "$APPDIR" \
     --desktop-file "$APPDIR/usr/share/applications/$APP_IDENTIFIER.desktop" \
     --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP_IDENTIFIER.png" \
+    --plugin gtk \
     --output appimage
 
 sha256sum "$APPIMAGE_FILE" > "${APPIMAGE_FILE}.sha256"
-echo "AppImage created: $APPIMAGE_FILE"
+APPIMAGE_SIZE=$(du -h "$APPIMAGE_FILE" | cut -f1)
+echo "AppImage created: $APPIMAGE_FILE ($APPIMAGE_SIZE)"

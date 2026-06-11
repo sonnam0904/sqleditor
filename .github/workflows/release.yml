@@ -123,6 +123,7 @@ jobs:
           sudo apt-get install -y \
             build-essential cmake ninja-build pkg-config \
             libgtk-4-dev libepoxy-dev libx11-dev \
+            librsvg2-dev libgirepository-2.0-dev \
             libtirpc-dev libltdl-dev python3-venv \
             autoconf automake autoconf-archive \
             freetds-dev libgnutls28-dev libkrb5-dev

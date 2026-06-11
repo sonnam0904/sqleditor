@@ -31,6 +31,8 @@ install_dependencies() {
                 libpq-dev \
                 libgtk-4-dev \
                 libepoxy-dev \
+                librsvg2-dev \
+                libgirepository-2.0-dev \
                 libx11-dev \
                 libssl-dev \
                 libmysqlclient-dev \
@@ -39,8 +41,12 @@ install_dependencies() {
                 freetds-dev \
                 libgnutls28-dev \
                 libkrb5-dev \
-                libnvidia-egl-gbm1 \
                 unzip
+            # Runtime helper for GtkGLArea + OpenGL on NVIDIA (not required to compile).
+            if apt-cache show libnvidia-egl-gbm1 &>/dev/null; then
+                echo "Installing libnvidia-egl-gbm1 (NVIDIA OpenGL runtime)..."
+                sudo apt install -y libnvidia-egl-gbm1
+            fi
         elif command -v dnf &> /dev/null; then
             echo "Installing Fedora dependencies..."
             sudo dnf install -y \

@@ -21,12 +21,58 @@
 
 Download pre-built binaries from [GitHub Releases](https://github.com/sonnam0904/sqleditor/releases).
 
-| Platform | File | Cách chạy |
-|----------|------|-----------|
+| Platform | File | How to run |
+|----------|------|------------|
 | Linux (x86_64) | `SQLEditor-x86_64.AppImage` | `chmod +x SQLEditor-x86_64.AppImage && ./SQLEditor-x86_64.AppImage` |
 
+### Troubleshooting on Linux
 
- 
+SQLEditor uses GTK4 + OpenGL (`GtkGLArea`). If the app fails to open a window, exits immediately, or reports an OpenGL context error, try the steps below.
+
+**NVIDIA GPU (Ubuntu / Debian)**
+
+`GtkGLArea` needs EGL + GBM. On NVIDIA drivers, the bridge library is often missing:
+
+```sh
+sudo apt install libnvidia-egl-gbm1
+```
+
+Then launch the app again. This is a **runtime** dependency (needed when running the app), not required to compile. `./scripts/setup` installs it automatically when the package is available in your apt repositories.
+
+**AppImage will not start**
+
+```sh
+chmod +x SQLEditor-x86_64.AppImage
+./SQLEditor-x86_64.AppImage
+```
+
+If FUSE is unavailable, extract and run directly:
+
+```sh
+./SQLEditor-x86_64.AppImage --appimage-extract
+./squashfs-root/AppRun
+```
+
+**Running from a source build**
+
+Install system dependencies before building:
+
+```sh
+./scripts/setup
+./scripts/build release
+./build_release/SQLEditor
+```
+
+**Still broken?** Run from a terminal to capture detailed logs:
+
+```sh
+./SQLEditor-x86_64.AppImage 2>&1 | tee sqleditor.log
+# or
+./build_release/SQLEditor 2>&1 | tee sqleditor.log
+```
+
+Attach `sqleditor.log` when filing an issue.
+
 ## Build from source
 
 ### Prerequisites
