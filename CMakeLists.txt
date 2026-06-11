@@ -175,6 +175,7 @@ set(APP_SOURCES
     src/database/mysql/mysql_internal.cpp
     src/database/redis.cpp
     src/database/mongodb.cpp
+    src/database/mongodb/mongo_filter.cpp
     src/database/mongodb/mongodb_database_node.cpp
     src/database/mssql.cpp
     src/database/mssql/mssql_database_node.cpp

@@ -6,6 +6,7 @@ add_executable(
     tests/database/mysql_database_test.cpp
     tests/database/redis_database_test.cpp
     tests/database/mongodb_database_test.cpp
+    tests/database/mongo_filter_test.cpp
     tests/database/mssql_database_test.cpp
     tests/database/oracle_database_test.cpp
     tests/database/cassandra_database_test.cpp
@@ -24,6 +25,7 @@ add_executable(
     src/database/mysql/mysql_internal.cpp
     src/database/redis.cpp
     src/database/mongodb.cpp
+    src/database/mongodb/mongo_filter.cpp
     src/database/mongodb/mongodb_database_node.cpp
     src/database/mssql.cpp
     src/database/mssql/mssql_database_node.cpp

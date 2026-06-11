@@ -1,3 +1,4 @@
+#include "database/mongodb/mongo_filter.hpp"
 #include "database/mongodb/mongodb_database_node.hpp"
 #include "database/mongodb.hpp"
 #include <algorithm>
@@ -390,25 +391,15 @@ MongoDBDatabaseNode::getTableData(const Table& collection, const int limit, cons
         opts.limit(limit);
         opts.skip(offset);
 
-        bsoncxx::document::view_or_value filterDoc = bsoncxx::builder::stream::document{}
-                                                     << bsoncxx::builder::stream::finalize;
-        if (!filter.empty()) {
-            try {
-                filterDoc = bsoncxx::from_json(filter);
-            } catch (...) {
-                // Invalid filter, use empty
-            }
-        }
-
+        bsoncxx::document::value filterDoc = parseMongoFilter(filter);
         if (!sort.empty()) {
-            try {
-                opts.sort(bsoncxx::from_json(sort));
-            } catch (...) {
-                // Invalid sort, ignore
+            const auto sortDoc = parseMongoSort(sort);
+            if (!sortDoc.view().empty()) {
+                opts.sort(sortDoc.view());
             }
         }
 
-        auto cursor = coll.find(filterDoc, opts);
+        auto cursor = coll.find(filterDoc.view(), opts);
 
         for (auto&& doc : cursor) {
             std::vector<std::string> row;
@@ -458,17 +449,8 @@ int MongoDBDatabaseNode::getRowCount(const Table& collection, const std::string&
         auto db = (*client)[name];
         auto coll = db[collectionName];
 
-        bsoncxx::document::view_or_value filterDoc = bsoncxx::builder::stream::document{}
-                                                     << bsoncxx::builder::stream::finalize;
-        if (!filter.empty()) {
-            try {
-                filterDoc = bsoncxx::from_json(filter);
-            } catch (...) {
-                // Invalid filter, use empty
-            }
-        }
-
-        return static_cast<int>(coll.count_documents(filterDoc));
+        const auto filterDoc = parseMongoFilter(filter);
+        return static_cast<int>(coll.count_documents(filterDoc.view()));
     } catch (const std::exception& e) {
         spdlog::error("Error getting row count for {}: {}", collectionName, e.what());
         return 0;
