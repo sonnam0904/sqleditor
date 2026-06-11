@@ -8,6 +8,7 @@
     "url": "git+https://github.com/sonnam0904/sqleditor.git"
   },
   "devDependencies": {
+    "conventional-changelog-conventionalcommits": "^8.0.0",
     "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/exec": "^6.0.3",
