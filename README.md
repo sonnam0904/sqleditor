@@ -25,7 +25,7 @@ Download pre-built binaries from [GitHub Releases](https://github.com/sonnam0904
 |----------|------|
 | Linux (x86_64) | `SQLEditor-x86_64.AppImage` |
 | Windows (x64) | `SQLEditor-x64.msi` |
-
+ 
 ## Build from source
 
 ### Prerequisites
