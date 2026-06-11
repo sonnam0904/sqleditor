@@ -6,6 +6,11 @@ on:
       - master
       - main
   workflow_dispatch:
+    inputs:
+      publish_binaries:
+        description: Build executables and publish a GitHub pre-release (no conventional commit required)
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -25,7 +30,6 @@ jobs:
       published: ${{ steps.semrel.outputs.new_release_published }}
       version: ${{ steps.semrel.outputs.new_release_version }}
       tag: ${{ steps.semrel.outputs.new_release_git_tag }}
-      notes: ${{ steps.semrel.outputs.new_release_notes }}
 
     steps:
       - name: Checkout
@@ -49,17 +53,60 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  plan-release:
+    name: Plan release
+    needs: semantic-release
+    runs-on: ubuntu-24.04
+    outputs:
+      should_build: ${{ steps.plan.outputs.should_build }}
+      checkout_ref: ${{ steps.plan.outputs.checkout_ref }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      release_version: ${{ steps.plan.outputs.release_version }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      use_changelog: ${{ steps.plan.outputs.use_changelog }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decide release plan
+        id: plan
+        run: |
+          if [ "${{ needs.semantic-release.outputs.published }}" = "true" ]; then
+            {
+              echo "should_build=true"
+              echo "checkout_ref=${{ needs.semantic-release.outputs.tag }}"
+              echo "release_tag=${{ needs.semantic-release.outputs.tag }}"
+              echo "release_version=${{ needs.semantic-release.outputs.version }}"
+              echo "prerelease=false"
+              echo "use_changelog=true"
+            } >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.publish_binaries }}" = "true" ]; then
+            VERSION=$(grep '^APP_VERSION=' APP_METADATA | cut -d= -f2)
+            TAG="v${VERSION}-build.${GITHUB_RUN_NUMBER}"
+            {
+              echo "should_build=true"
+              echo "checkout_ref=${{ github.sha }}"
+              echo "release_tag=${TAG}"
+              echo "release_version=${VERSION}-build.${GITHUB_RUN_NUMBER}"
+              echo "prerelease=true"
+              echo "use_changelog=false"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build-linux:
     name: Build Linux
-    needs: semantic-release
-    if: needs.semantic-release.outputs.published == 'true'
+    needs: plan-release
+    if: needs.plan-release.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout release tag
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.semantic-release.outputs.tag }}
+          ref: ${{ needs.plan-release.outputs.checkout_ref }}
           submodules: recursive
 
       - name: Export GitHub Actions cache env
@@ -110,6 +157,7 @@ jobs:
           mkdir -p release-artifacts
           cp "build_release/${APPIMAGE_NAME}" release-artifacts/
           cp "build_release/${APPIMAGE_NAME}.sha256" release-artifacts/
+          chmod +x "release-artifacts/${APPIMAGE_NAME}"
           echo "${APPIMAGE_NAME}" > release-artifacts/linux-appimage-name.txt
 
       - name: Upload Linux artifact
@@ -121,15 +169,15 @@ jobs:
 
   build-windows:
     name: Build Windows
-    needs: semantic-release
-    if: needs.semantic-release.outputs.published == 'true'
+    needs: plan-release
+    if: needs.plan-release.outputs.should_build == 'true'
     runs-on: windows-2022
 
     steps:
-      - name: Checkout release tag
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.semantic-release.outputs.tag }}
+          ref: ${{ needs.plan-release.outputs.checkout_ref }}
           submodules: recursive
 
       - name: Export GitHub Actions cache env
@@ -175,9 +223,13 @@ jobs:
         run: |
           $appName = ((Select-String -Path APP_METADATA -Pattern '^APP_NAME=').Line -split '=', 2)[1]
           $msiName = "$appName-x64.msi"
+          & "$PWD\scripts\package-windows-portable.ps1"
+          $zipName = "$appName-windows-x64-portable.zip"
           New-Item -ItemType Directory -Force -Path release-artifacts | Out-Null
           Copy-Item "build_release/$msiName" "release-artifacts/"
+          Copy-Item "build_release/$zipName" "release-artifacts/"
           Set-Content -Path release-artifacts/windows-msi-name.txt -Value $msiName
+          Set-Content -Path release-artifacts/windows-zip-name.txt -Value $zipName
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -188,24 +240,44 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: [semantic-release, build-linux, build-windows]
-    if: needs.semantic-release.outputs.published == 'true'
+    needs: [plan-release, build-linux, build-windows]
+    if: needs.plan-release.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout release tag
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.semantic-release.outputs.tag }}
+          ref: ${{ needs.plan-release.outputs.checkout_ref }}
 
-      - name: Extract release notes
+      - name: Write release notes
         run: |
-          VERSION="${{ needs.semantic-release.outputs.version }}"
-          awk -v version="${VERSION}" '
-            $0 ~ "^## \\[" version "\\]" { found=1; next }
-            found && /^## \[/ { exit }
-            found { print }
-          ' CHANGELOG.md > release-notes.md
+          if [ "${{ needs.plan-release.outputs.use_changelog }}" = "true" ]; then
+            VERSION="${{ needs.plan-release.outputs.release_version }}"
+            awk -v version="${VERSION}" '
+              $0 ~ "^## \\[" version "\\]" { found=1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' CHANGELOG.md > release-notes.md
+          else
+            cat > release-notes.md <<'EOF'
+          ## Downloads
+
+          Pre-built executables — no compilation required.
+
+          ### Linux (x86_64)
+          1. Download `SQLEditor-x86_64.AppImage`
+          2. Run:
+          ```sh
+          chmod +x SQLEditor-x86_64.AppImage
+          ./SQLEditor-x86_64.AppImage
+          ```
+
+          ### Windows (x64)
+          - **Portable:** unzip `SQLEditor-windows-x64-portable.zip` and run `SQLEditor.exe`
+          - **Installer:** run `SQLEditor-x64.msi`
+          EOF
+          fi
 
       - name: Download Linux artifact
         uses: actions/download-artifact@v4
@@ -223,21 +295,27 @@ jobs:
         run: |
           APPIMAGE_NAME=$(cat artifacts/linux/linux-appimage-name.txt)
           MSI_NAME=$(cat artifacts/windows/windows-msi-name.txt)
+          ZIP_NAME=$(cat artifacts/windows/windows-zip-name.txt)
           SHA256=$(cut -d' ' -f1 "artifacts/linux/${APPIMAGE_NAME}.sha256")
-          TAG="${{ needs.semantic-release.outputs.tag }}"
-          VERSION="${{ needs.semantic-release.outputs.version }}"
+          TAG="${{ needs.plan-release.outputs.release_tag }}"
+          VERSION="${{ needs.plan-release.outputs.release_version }}"
 
           cat > artifacts/version.json <<EOF
           {
             "version": "${VERSION}",
             "tag": "${TAG}",
-            "release_notes": "",
             "downloads": {
-              "appimage-x86_64": {
+              "linux-appimage-x86_64": {
+                "file": "${APPIMAGE_NAME}",
                 "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${APPIMAGE_NAME}",
                 "sha256": "${SHA256}"
               },
-              "msi-x64": {
+              "windows-portable-x64": {
+                "file": "${ZIP_NAME}",
+                "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ZIP_NAME}"
+              },
+              "windows-installer-x64": {
+                "file": "${MSI_NAME}",
                 "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${MSI_NAME}"
               }
             }
@@ -248,19 +326,21 @@ jobs:
         run: |
           APPIMAGE_NAME=$(cat artifacts/linux/linux-appimage-name.txt)
           MSI_NAME=$(cat artifacts/windows/windows-msi-name.txt)
+          ZIP_NAME=$(cat artifacts/windows/windows-zip-name.txt)
           mkdir -p release-upload
           cp "artifacts/linux/${APPIMAGE_NAME}" release-upload/
           cp "artifacts/linux/${APPIMAGE_NAME}.sha256" release-upload/
           cp "artifacts/windows/${MSI_NAME}" release-upload/
+          cp "artifacts/windows/${ZIP_NAME}" release-upload/
           cp artifacts/version.json release-upload/
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.semantic-release.outputs.tag }}
-          name: SQLEditor ${{ needs.semantic-release.outputs.version }}
+          tag_name: ${{ needs.plan-release.outputs.release_tag }}
+          name: SQLEditor ${{ needs.plan-release.outputs.release_version }}
           body_path: release-notes.md
-          prerelease: false
+          prerelease: ${{ needs.plan-release.outputs.prerelease }}
           files: release-upload/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
