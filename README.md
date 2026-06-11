@@ -19,7 +19,48 @@
 
 ## Installation
 
-Download the latest release for macOS, Linux, and Windows from [GitHub Releases](https://github.com/sonnam0904/sqleditor/releases).
+Download pre-built binaries from [GitHub Releases](https://github.com/sonnam0904/sqleditor/releases).
+
+| Platform | File |
+|----------|------|
+| Linux (x86_64) | `SQLEditor-x86_64.AppImage` |
+| Windows (x64) | `SQLEditor-x64.msi` |
+
+### Automatic releases (semantic-release)
+
+Mỗi push lên `master` chạy [semantic-release](https://semantic-release.gitbook.io/) để phân tích commit theo [Conventional Commits](https://www.conventionalcommits.org/). Nếu có thay đổi đáng release, workflow sẽ:
+
+1. Tự động tăng `APP_VERSION` trong `APP_METADATA`
+2. Cập nhật `CHANGELOG.md`
+3. Tạo git tag `vX.Y.Z` và commit `chore(release): X.Y.Z [skip ci]`
+4. Build Linux (AppImage) + Windows (MSI)
+5. Đăng [GitHub Release](https://github.com/sonnam0904/sqleditor/releases) kèm file tải về
+
+**Quy tắc tăng version:**
+
+| Commit message | Version bump |
+|----------------|--------------|
+| `fix: ...` | Patch — `0.4.9` → `0.4.10` |
+| `feat: ...` | Minor — `0.4.9` → `0.5.0` |
+| `feat!: ...` hoặc footer `BREAKING CHANGE:` | Major — `0.4.9` → `1.0.0` |
+| `docs:`, `chore:`, `style:`, `refactor:`, `test:`, `ci:` | Không release |
+
+**Ví dụ commit:**
+
+```sh
+git commit -m "feat: add Redis TLS connection support"
+git commit -m "fix: crash when opening empty SQLite file"
+git commit -m "feat!: redesign connection URL parser"
+```
+
+**Thiết lập lần đầu** — tag phiên bản hiện tại làm baseline (bắt buộc nếu repo chưa có tag `v*`):
+
+```sh
+git tag v0.4.9
+git push origin v0.4.9
+```
+
+Sau đó mỗi commit `feat:` / `fix:` trên `master` sẽ tự động tạo release mới.
 
 ## Build from source
 

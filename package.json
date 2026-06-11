@@ -1,0 +1,19 @@
+{
+  "name": "sqleditor",
+  "private": true,
+  "version": "0.0.0-development",
+  "description": "Release tooling for SQLEditor",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sonnam0904/sqleditor.git"
+  },
+  "devDependencies": {
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/exec": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/github": "^11.0.1",
+    "@semantic-release/release-notes-generator": "^14.0.3",
+    "semantic-release": "^24.2.3"
+  }
+}
