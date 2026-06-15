@@ -41,6 +41,17 @@ void PostgresSchemaNode::checkTablesStatusAsync() {
     });
 }
 
+void PostgresSchemaNode::cancelPendingAsyncWork() {
+    tablesLoader.cancel();
+    viewsLoader.cancel();
+    materializedViewsLoader.cancel();
+    sequencesLoader.cancel();
+    routinesLoader.cancel();
+    for (auto& [tableName, loader] : tableRefreshLoaders) {
+        loader.cancel();
+    }
+}
+
 void PostgresSchemaNode::startTablesLoadAsync(const bool forceRefresh) {
     spdlog::debug("startTablesLoadAsync for schema: {}{}", name,
                   (forceRefresh ? " (force refresh)" : ""));

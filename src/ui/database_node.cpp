@@ -47,6 +47,10 @@ namespace {
     constexpr const char* BACKUP_LABEL = "Backup";
     constexpr const char* RESTORE_LABEL = "Restore";
 
+    constexpr ImGuiTreeNodeFlags kDefaultTreeNodeFlags =
+        ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick |
+        ImGuiTreeNodeFlags_FramePadding;
+
     // shared routine rendering for all database types
     void renderRoutineItems(const std::vector<Routine>& routines, IDatabaseNode* node) {
         auto& app = Application::getInstance();
@@ -145,6 +149,26 @@ namespace {
 
 DatabaseHierarchy::DatabaseHierarchy(std::shared_ptr<DatabaseInterface> dbInterface)
     : db(std::move(dbInterface)) {}
+
+void DatabaseHierarchy::setTableSearchFilter(const std::string_view filter) {
+    tableSearchFilter_ = filter;
+}
+
+bool DatabaseHierarchy::matchesTableSearch(const std::string_view name) const {
+    if (tableSearchFilter_.empty()) {
+        return true;
+    }
+
+    std::string lowerName(name);
+    std::string lowerFilter(tableSearchFilter_);
+    std::ranges::transform(lowerName, lowerName.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    std::ranges::transform(lowerFilter, lowerFilter.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return lowerName.find(lowerFilter) != std::string::npos;
+}
 
 void DatabaseHierarchy::handleTableClick(const Table* table) {
     const ImGuiIO& io = ImGui::GetIO();
@@ -283,7 +307,8 @@ void DatabaseHierarchy::renderMultiSelectMenuContent(
 
 bool DatabaseHierarchy::renderTreeNodeWithIcon(const std::string& label, const std::string& nodeId,
                                                const std::string& icon, const ImU32 iconColor,
-                                               const ImGuiTreeNodeFlags flags) {
+                                               const ImGuiTreeNodeFlags flags,
+                                               const bool expandWhenSearching) {
     const std::string fullLabel = std::format("   {}###{}", label, nodeId);
 
     ImGui::PushID(nodeId.c_str());
@@ -310,7 +335,11 @@ bool DatabaseHierarchy::renderTreeNodeWithIcon(const std::string& label, const s
                                                   ImGui::ColorConvertFloat4ToU32(hoverColor), 0);
     }
 
-    const bool isOpen = ImGui::TreeNodeEx(fullLabel.c_str(), flags);
+    const ImGuiTreeNodeFlags nodeFlags =
+        expandWhenSearching && hasTableSearchFilter()
+            ? (flags | ImGuiTreeNodeFlags_DefaultOpen)
+            : flags;
+    const bool isOpen = ImGui::TreeNodeEx(fullLabel.c_str(), nodeFlags);
 
     const auto iconPos =
         ImVec2(ImGui::GetItemRectMin().x + ImGui::GetTreeNodeToLabelSpacing(),
@@ -695,7 +724,8 @@ void DatabaseHierarchy::renderSQLiteNode() {
         const std::string tablesNodeId =
             std::format("sqlite_tables_{:p}", static_cast<void*>(sqliteDb));
         const bool tablesOpen = renderTreeNodeWithIcon("Tables", tablesNodeId, ICON_FK_TABLE,
-                                                       ImGui::GetColorU32(colors.green));
+                                                       ImGui::GetColorU32(colors.green),
+                                                       kDefaultTreeNodeFlags, true);
 
         // Context menu for Tables node
         if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -732,6 +762,9 @@ void DatabaseHierarchy::renderSQLiteNode() {
                     ImGui::PopStyleColor();
                 } else {
                     for (auto& table : tables) {
+                        if (!matchesTableSearch(table.name)) {
+                            continue;
+                        }
                         renderSQLiteTableNode(table, sqliteDb);
                     }
                 }
@@ -745,7 +778,8 @@ void DatabaseHierarchy::renderSQLiteNode() {
         const std::string viewsNodeId =
             std::format("sqlite_views_{:p}", static_cast<void*>(sqliteDb));
         const bool viewsOpen = renderTreeNodeWithIcon("Views", viewsNodeId, ICON_FK_EYE,
-                                                      ImGui::GetColorU32(colors.teal));
+                                                      ImGui::GetColorU32(colors.teal),
+                                                      kDefaultTreeNodeFlags, true);
 
         // Context menu for Views node
         if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -779,6 +813,9 @@ void DatabaseHierarchy::renderSQLiteNode() {
                     ImGui::PopStyleColor();
                 } else {
                     for (auto& view : views) {
+                        if (!matchesTableSearch(view.name)) {
+                            continue;
+                        }
                         renderSQLiteViewNode(view, sqliteDb);
                     }
                 }
@@ -861,7 +898,8 @@ void DatabaseHierarchy::renderPostgresDatabaseNode(PostgresDatabaseNode* dbData)
 
     const std::string nodeId = std::format("db_{}_{:p}", dbData->name, static_cast<void*>(dbData));
     const bool isOpen = renderTreeNodeWithIcon(dbData->name, nodeId, ICON_FK_DATABASE,
-                                               ImGui::GetColorU32(colors.blue));
+                                               ImGui::GetColorU32(colors.blue),
+                                               kDefaultTreeNodeFlags, true);
     const ImVec2 pgNodeMin = ImGui::GetItemRectMin();
     const ImVec2 pgNodeMax = ImGui::GetItemRectMax();
     if (dbData->schemasLoaded && !dbData->schemas.empty()) {
@@ -1146,7 +1184,8 @@ void DatabaseHierarchy::renderPostgresSchemaNode(const PostgresDatabaseNode* dbD
     const std::string nodeId =
         std::format("schema_{}_{:p}", schemaData->name, static_cast<void*>(schemaData));
     const bool isOpen = renderTreeNodeWithIcon(schemaData->name, nodeId, ICON_FK_FOLDER,
-                                               ImGui::GetColorU32(colors.yellow));
+                                               ImGui::GetColorU32(colors.yellow),
+                                               kDefaultTreeNodeFlags, true);
 
     // Context menu for schema
     if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -1206,7 +1245,8 @@ void DatabaseHierarchy::renderPostgresSchemaNode(const PostgresDatabaseNode* dbD
             const std::string tablesNodeId = std::format("tables_{}_{:p}", schemaData->name,
                                                          static_cast<void*>(&schemaData->tables));
             const bool tablesOpen = renderTreeNodeWithIcon("Tables", tablesNodeId, ICON_FK_TABLE,
-                                                           ImGui::GetColorU32(colors.green));
+                                                           ImGui::GetColorU32(colors.green),
+                                                           kDefaultTreeNodeFlags, true);
 
             // Context menu for Tables node
             if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -1241,8 +1281,27 @@ void DatabaseHierarchy::renderPostgresSchemaNode(const PostgresDatabaseNode* dbD
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& table : schemaData->tables) {
+                            if (!matchesTableSearch(table.name)) {
+                                continue;
+                            }
                             renderTableNode(table, schemaData);
                         }
+                    }
+                } else {
+                    if (!schemaData->getLastTablesError().empty()) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, colors.red);
+                        ImGui::TextWrapped("  Failed to load tables: %s",
+                                            schemaData->getLastTablesError().c_str());
+                        ImGui::PopStyleColor();
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+                        ImGui::Text("  Tables not loaded");
+                        ImGui::PopStyleColor();
+                    }
+                    ImGui::SameLine(0, Theme::Spacing::S);
+                    if (ImGui::SmallButton(std::format("Retry##tables_{}", schemaData->name)
+                                               .c_str())) {
+                        schemaData->startTablesLoadAsync(true);
                     }
                 }
                 ImGui::TreePop();
@@ -1254,7 +1313,8 @@ void DatabaseHierarchy::renderPostgresSchemaNode(const PostgresDatabaseNode* dbD
             const std::string viewsNodeId = std::format("views_{}_{:p}", schemaData->name,
                                                         static_cast<void*>(&schemaData->views));
             const bool viewsOpen = renderTreeNodeWithIcon("Views", viewsNodeId, ICON_FK_EYE,
-                                                          ImGui::GetColorU32(colors.teal));
+                                                          ImGui::GetColorU32(colors.teal),
+                                                          kDefaultTreeNodeFlags, true);
 
             // Context menu for Views node
             if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -1286,6 +1346,9 @@ void DatabaseHierarchy::renderPostgresSchemaNode(const PostgresDatabaseNode* dbD
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& view : schemaData->views) {
+                            if (!matchesTableSearch(view.name)) {
+                                continue;
+                            }
                             renderViewNode(view, schemaData);
                         }
                     }
@@ -1301,7 +1364,8 @@ void DatabaseHierarchy::renderPostgresSchemaNode(const PostgresDatabaseNode* dbD
                             static_cast<void*>(&schemaData->materializedViews));
             const bool matViewsOpen =
                 renderTreeNodeWithIcon("Materialized Views", matViewsNodeId, ICON_FK_EYE,
-                                       ImGui::GetColorU32(colors.lavender));
+                                       ImGui::GetColorU32(colors.lavender), kDefaultTreeNodeFlags,
+                                       true);
 
             // Context menu for Materialized Views node
             if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -1335,6 +1399,9 @@ void DatabaseHierarchy::renderPostgresSchemaNode(const PostgresDatabaseNode* dbD
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& mv : schemaData->materializedViews) {
+                            if (!matchesTableSearch(mv.name)) {
+                                continue;
+                            }
                             renderViewNode(mv, schemaData, true);
                         }
                     }
@@ -1468,7 +1535,8 @@ void DatabaseHierarchy::renderMySQLDatabaseNode(MySQLDatabaseNode* dbData) {
 
     const std::string nodeId = std::format("db_{}_{:p}", dbData->name, static_cast<void*>(dbData));
     const bool isOpen = renderTreeNodeWithIcon(dbData->name, nodeId, ICON_FK_DATABASE,
-                                               ImGui::GetColorU32(colors.blue));
+                                               ImGui::GetColorU32(colors.blue),
+                                               kDefaultTreeNodeFlags, true);
 
     // Handle expand/collapse
     if (ImGui::IsItemToggledOpen()) {
@@ -1528,7 +1596,8 @@ void DatabaseHierarchy::renderMySQLDatabaseNode(MySQLDatabaseNode* dbData) {
             const std::string tablesNodeId =
                 std::format("tables_{}_{:p}", dbData->name, static_cast<void*>(&dbData->tables));
             const bool tablesOpen = renderTreeNodeWithIcon("Tables", tablesNodeId, ICON_FK_TABLE,
-                                                           ImGui::GetColorU32(colors.green));
+                                                           ImGui::GetColorU32(colors.green),
+                                                           kDefaultTreeNodeFlags, true);
 
             // Context menu for Tables node
             if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -1563,6 +1632,9 @@ void DatabaseHierarchy::renderMySQLDatabaseNode(MySQLDatabaseNode* dbData) {
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& table : dbData->tables) {
+                            if (!matchesTableSearch(table.name)) {
+                                continue;
+                            }
                             renderMySQLTableNode(table, dbData);
                         }
                     }
@@ -1576,7 +1648,8 @@ void DatabaseHierarchy::renderMySQLDatabaseNode(MySQLDatabaseNode* dbData) {
             const std::string viewsNodeId =
                 std::format("views_{}_{:p}", dbData->name, static_cast<void*>(&dbData->views));
             const bool viewsOpen = renderTreeNodeWithIcon("Views", viewsNodeId, ICON_FK_EYE,
-                                                          ImGui::GetColorU32(colors.teal));
+                                                          ImGui::GetColorU32(colors.teal),
+                                                          kDefaultTreeNodeFlags, true);
 
             // Context menu for Views node
             if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -1608,6 +1681,9 @@ void DatabaseHierarchy::renderMySQLDatabaseNode(MySQLDatabaseNode* dbData) {
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& view : dbData->views) {
+                            if (!matchesTableSearch(view.name)) {
+                                continue;
+                            }
                             renderMySQLViewNode(view, dbData);
                         }
                     }
@@ -2343,7 +2419,8 @@ void DatabaseHierarchy::renderMSSQLDatabaseNode(MSSQLDatabaseNode* dbData) {
 
     const std::string nodeId = std::format("db_{}_{:p}", dbData->name, static_cast<void*>(dbData));
     const bool isOpen = renderTreeNodeWithIcon(dbData->name, nodeId, ICON_FK_DATABASE,
-                                               ImGui::GetColorU32(colors.purple));
+                                               ImGui::GetColorU32(colors.purple),
+                                               kDefaultTreeNodeFlags, true);
     const ImVec2 msNodeMin = ImGui::GetItemRectMin();
     const ImVec2 msNodeMax = ImGui::GetItemRectMax();
     if (dbData->schemasLoaded && !dbData->schemas.empty()) {
@@ -2437,7 +2514,8 @@ void DatabaseHierarchy::renderMSSQLSchemaNode(const MSSQLDatabaseNode* dbData,
     const std::string nodeId =
         std::format("mssql_schema_{}_{:p}", schemaData->name, static_cast<void*>(schemaData));
     const bool isOpen = renderTreeNodeWithIcon(schemaData->name, nodeId, ICON_FK_FOLDER,
-                                               ImGui::GetColorU32(colors.yellow));
+                                               ImGui::GetColorU32(colors.yellow),
+                                               kDefaultTreeNodeFlags, true);
 
     // context menu
     if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -2463,7 +2541,8 @@ void DatabaseHierarchy::renderMSSQLSchemaNode(const MSSQLDatabaseNode* dbData,
             const std::string tablesNodeId = std::format("mssql_tables_{}_{:p}", schemaData->name,
                                                          static_cast<void*>(&schemaData->tables));
             const bool tablesOpen = renderTreeNodeWithIcon("Tables", tablesNodeId, ICON_FK_TABLE,
-                                                           ImGui::GetColorU32(colors.green));
+                                                           ImGui::GetColorU32(colors.green),
+                                                           kDefaultTreeNodeFlags, true);
 
             if (ImGui::BeginPopupContextItem(nullptr)) {
                 ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
@@ -2497,6 +2576,9 @@ void DatabaseHierarchy::renderMSSQLSchemaNode(const MSSQLDatabaseNode* dbData,
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& table : schemaData->tables) {
+                            if (!matchesTableSearch(table.name)) {
+                                continue;
+                            }
                             renderMSSQLTableNode(table, schemaData);
                         }
                     }
@@ -2510,7 +2592,8 @@ void DatabaseHierarchy::renderMSSQLSchemaNode(const MSSQLDatabaseNode* dbData,
             const std::string viewsNodeId = std::format("mssql_views_{}_{:p}", schemaData->name,
                                                         static_cast<void*>(&schemaData->views));
             const bool viewsOpen = renderTreeNodeWithIcon("Views", viewsNodeId, ICON_FK_EYE,
-                                                          ImGui::GetColorU32(colors.teal));
+                                                          ImGui::GetColorU32(colors.teal),
+                                                          kDefaultTreeNodeFlags, true);
 
             if (ImGui::BeginPopupContextItem(nullptr)) {
                 ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
@@ -2541,6 +2624,9 @@ void DatabaseHierarchy::renderMSSQLSchemaNode(const MSSQLDatabaseNode* dbData,
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& view : schemaData->views) {
+                            if (!matchesTableSearch(view.name)) {
+                                continue;
+                            }
                             renderMSSQLViewNode(view, schemaData);
                         }
                     }
@@ -2891,7 +2977,8 @@ void DatabaseHierarchy::renderOracleDatabaseNode(OracleDatabaseNode* dbData) {
 
     const std::string nodeId = std::format("db_{}_{:p}", dbData->name, static_cast<void*>(dbData));
     const bool isOpen = renderTreeNodeWithIcon(dbData->name, nodeId, ICON_FK_DATABASE,
-                                               ImGui::GetColorU32(colors.purple));
+                                               ImGui::GetColorU32(colors.purple),
+                                               kDefaultTreeNodeFlags, true);
 
     if (ImGui::IsItemToggledOpen()) {
         dbData->expanded = isOpen;
@@ -2944,7 +3031,8 @@ void DatabaseHierarchy::renderOracleDatabaseNode(OracleDatabaseNode* dbData) {
             const std::string tablesNodeId =
                 std::format("tables_{}_{:p}", dbData->name, static_cast<void*>(&dbData->tables));
             const bool tablesOpen = renderTreeNodeWithIcon("Tables", tablesNodeId, ICON_FK_TABLE,
-                                                           ImGui::GetColorU32(colors.green));
+                                                           ImGui::GetColorU32(colors.green),
+                                                           kDefaultTreeNodeFlags, true);
 
             if (ImGui::BeginPopupContextItem(nullptr)) {
                 ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
@@ -2978,6 +3066,9 @@ void DatabaseHierarchy::renderOracleDatabaseNode(OracleDatabaseNode* dbData) {
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& table : dbData->tables) {
+                            if (!matchesTableSearch(table.name)) {
+                                continue;
+                            }
                             renderOracleTableNode(table, dbData);
                         }
                     }
@@ -2991,7 +3082,8 @@ void DatabaseHierarchy::renderOracleDatabaseNode(OracleDatabaseNode* dbData) {
             const std::string viewsNodeId =
                 std::format("views_{}_{:p}", dbData->name, static_cast<void*>(&dbData->views));
             const bool viewsOpen = renderTreeNodeWithIcon("Views", viewsNodeId, ICON_FK_EYE,
-                                                          ImGui::GetColorU32(colors.teal));
+                                                          ImGui::GetColorU32(colors.teal),
+                                                          kDefaultTreeNodeFlags, true);
 
             if (ImGui::BeginPopupContextItem(nullptr)) {
                 ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
@@ -3022,6 +3114,9 @@ void DatabaseHierarchy::renderOracleDatabaseNode(OracleDatabaseNode* dbData) {
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& view : dbData->views) {
+                            if (!matchesTableSearch(view.name)) {
+                                continue;
+                            }
                             renderOracleViewNode(view, dbData);
                         }
                     }
@@ -3371,7 +3466,8 @@ void DatabaseHierarchy::renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData) {
 
     const std::string nodeId = std::format("db_{}_{:p}", dbData->name, static_cast<void*>(dbData));
     const bool isOpen = renderTreeNodeWithIcon(dbData->name, nodeId, ICON_FK_DATABASE,
-                                               ImGui::GetColorU32(colors.green));
+                                               ImGui::GetColorU32(colors.green),
+                                               kDefaultTreeNodeFlags, true);
 
     if (ImGui::IsItemToggledOpen()) {
         dbData->expanded = isOpen;
@@ -3420,7 +3516,8 @@ void DatabaseHierarchy::renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData) {
             const std::string collectionsNodeId = std::format(
                 "collections_{}_{:p}", dbData->name, static_cast<void*>(&dbData->collections));
             const bool collectionsOpen = renderTreeNodeWithIcon(
-                "Collections", collectionsNodeId, ICON_FK_TABLE, ImGui::GetColorU32(colors.green));
+                "Collections", collectionsNodeId, ICON_FK_TABLE, ImGui::GetColorU32(colors.green),
+                kDefaultTreeNodeFlags, true);
 
             // Context menu for Collections node
             if (ImGui::BeginPopupContextItem(nullptr)) {
@@ -3453,6 +3550,9 @@ void DatabaseHierarchy::renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData) {
                         ImGui::PopStyleColor();
                     } else {
                         for (auto& collection : dbData->collections) {
+                            if (!matchesTableSearch(collection.name)) {
+                                continue;
+                            }
                             renderMongoDBCollectionNode(collection, dbData);
                         }
                     }
@@ -4107,7 +4207,8 @@ void DatabaseHierarchy::renderCassandraDatabaseNode(CassandraDatabaseNode* dbDat
 
     const std::string nodeId = std::format("ks_{}_{:p}", dbData->name, static_cast<void*>(dbData));
     const bool isOpen = renderTreeNodeWithIcon(dbData->name, nodeId, ICON_FK_DATABASE,
-                                               ImGui::GetColorU32(colors.blue));
+                                               ImGui::GetColorU32(colors.blue),
+                                               kDefaultTreeNodeFlags, true);
 
     if (ImGui::IsItemToggledOpen())
         dbData->expanded = isOpen;
@@ -4153,7 +4254,8 @@ void DatabaseHierarchy::renderCassandraDatabaseNode(CassandraDatabaseNode* dbDat
         const std::string tablesNodeId =
             std::format("cass_tables_{}_{:p}", dbData->name, static_cast<void*>(&dbData->tables));
         const bool tablesOpen = renderTreeNodeWithIcon("Tables", tablesNodeId, ICON_FK_TABLE,
-                                                       ImGui::GetColorU32(colors.green));
+                                                       ImGui::GetColorU32(colors.green),
+                                                       kDefaultTreeNodeFlags, true);
 
         if (ImGui::BeginPopupContextItem(nullptr)) {
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
@@ -4184,8 +4286,12 @@ void DatabaseHierarchy::renderCassandraDatabaseNode(CassandraDatabaseNode* dbDat
                     ImGui::Text("  No tables");
                     ImGui::PopStyleColor();
                 } else {
-                    for (auto& t : dbData->tables)
+                    for (auto& t : dbData->tables) {
+                        if (!matchesTableSearch(t.name)) {
+                            continue;
+                        }
                         renderCassandraTableNode(t, dbData);
+                    }
                 }
             }
             ImGui::TreePop();
@@ -4197,7 +4303,8 @@ void DatabaseHierarchy::renderCassandraDatabaseNode(CassandraDatabaseNode* dbDat
         const std::string viewsNodeId =
             std::format("cass_views_{}_{:p}", dbData->name, static_cast<void*>(&dbData->views));
         const bool viewsOpen = renderTreeNodeWithIcon("Materialized Views", viewsNodeId,
-                                                      ICON_FK_EYE, ImGui::GetColorU32(colors.teal));
+                                                      ICON_FK_EYE, ImGui::GetColorU32(colors.teal),
+                                                      kDefaultTreeNodeFlags, true);
 
         if (ImGui::BeginPopupContextItem(nullptr)) {
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
@@ -4225,8 +4332,12 @@ void DatabaseHierarchy::renderCassandraDatabaseNode(CassandraDatabaseNode* dbDat
                     ImGui::Text("  No views");
                     ImGui::PopStyleColor();
                 } else {
-                    for (auto& v : dbData->views)
+                    for (auto& v : dbData->views) {
+                        if (!matchesTableSearch(v.name)) {
+                            continue;
+                        }
                         renderCassandraViewNode(v, dbData);
+                    }
                 }
             }
             ImGui::TreePop();

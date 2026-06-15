@@ -1,16 +1,20 @@
 #pragma once
 
 #include "database/async_helper.hpp"
+#include "database/db_interface.hpp"
 #include "ui/auto_complete_input.hpp"
 #include "ui/tab/tab.hpp"
 #include "ui/table_renderer.hpp"
 #include "ui/text_editor.hpp"
+#include "themes.hpp"
 #include <memory>
 #include <string>
 #include <vector>
 
 // Forward declarations
 class IDatabaseNode;
+
+enum class MongoCollectionViewMode { Table, Json };
 
 class TableViewerTab final : public Tab {
 public:
@@ -92,6 +96,7 @@ private:
     char filterBuffer[512] = {0};
     std::string currentFilter;
     bool filterChanged = false;
+    bool filterParseError = false;
     std::unique_ptr<AutoCompleteInput> filterAutoComplete;
 
     // Sorting state
@@ -109,6 +114,12 @@ private:
     int lastSyncedCol = -1;
     std::string metadataFilter;
 
+    // MongoDB collection viewer
+    MongoCollectionViewMode mongoViewMode_ = MongoCollectionViewMode::Table;
+    std::vector<std::string> mongoDocumentJson_;
+
+    [[nodiscard]] bool isMongoCollection() const;
+
     // Helper methods
     void initializeTableRenderer();
     void selectCell(int row, int col);
@@ -123,5 +134,8 @@ private:
     void renderRightPanel(float panelWidth, float availableHeight);
     void renderValueTab();
     void renderMetadataTab();
+    void renderMongoJsonView(float width, float height);
     void syncValuePanelBuffer();
+    void renderToolbar(const Theme::Colors& colors);
+    void renderPaginationBar(const Theme::Colors& colors);
 };

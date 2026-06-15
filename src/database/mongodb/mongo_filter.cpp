@@ -5,6 +5,7 @@
 #include <bsoncxx/builder/stream/document.hpp>
 #include <bsoncxx/builder/stream/helpers.hpp>
 #include <bsoncxx/json.hpp>
+#include <bsoncxx/oid.hpp>
 #include <bsoncxx/types.hpp>
 #include <cctype>
 #include <optional>
@@ -113,6 +114,48 @@ namespace {
         return out;
     }
 
+    bool isObjectIdHex(std::string_view s) {
+        if (s.size() != 24) {
+            return false;
+        }
+        for (char c : s) {
+            if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::optional<std::string> elementAsString(const bsoncxx::document::element& elem) {
+        switch (elem.type()) {
+        case bsoncxx::type::k_string:
+            return std::string(elem.get_string().value);
+        case bsoncxx::type::k_int32:
+            return std::to_string(elem.get_int32().value);
+        case bsoncxx::type::k_int64:
+            return std::to_string(elem.get_int64().value);
+        default:
+            return std::nullopt;
+        }
+    }
+
+    template <typename StreamContext>
+    void appendElementValue(StreamContext&& ctx, const bsoncxx::document::element& elem);
+
+    template <typename StreamContext>
+    void appendFilterValue(StreamContext&& ctx, const std::string& field,
+                           const bsoncxx::document::element& elem) {
+        if (field == "_id") {
+            if (const auto text = elementAsString(elem)) {
+                if (isObjectIdHex(*text)) {
+                    ctx << bsoncxx::oid{*text};
+                    return;
+                }
+            }
+        }
+        appendElementValue(ctx, elem);
+    }
+
     template <typename StreamContext>
     void appendElementValue(StreamContext&& ctx, const bsoncxx::document::element& elem) {
         switch (elem.type()) {
@@ -159,45 +202,55 @@ namespace {
             return d << finalize;
         }
 
-        size_t start = i;
-        if (s[i] == '-') {
-            ++i;
-        }
-        while (i < s.size() &&
-               (std::isdigit(static_cast<unsigned char>(s[i])) || s[i] == '.' || s[i] == 'e' ||
-                s[i] == 'E' || s[i] == '+' || s[i] == '-')) {
-            ++i;
-        }
-        if (i > start) {
-            const std::string num = std::string(s.substr(start, i - start));
-            document d;
-            if (num.find('.') != std::string::npos || num.find('e') != std::string::npos ||
-                num.find('E') != std::string::npos) {
-                d << "v" << std::stod(num);
+        size_t tokenStart = i;
+        while (i < s.size()) {
+            const char c = s[i];
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.') {
+                ++i;
             } else {
-                d << "v" << static_cast<std::int64_t>(std::stoll(num));
+                break;
             }
+        }
+        if (i > tokenStart) {
+            const std::string token = std::string(s.substr(tokenStart, i - tokenStart));
+            document d;
+            if (iequals(token, "true")) {
+                d << "v" << true;
+                return d << finalize;
+            }
+            if (iequals(token, "false")) {
+                d << "v" << false;
+                return d << finalize;
+            }
+            if (iequals(token, "null")) {
+                d << "v" << bsoncxx::types::b_null{};
+                return d << finalize;
+            }
+
+            bool hasAlpha = false;
+            for (char c : token) {
+                if (std::isalpha(static_cast<unsigned char>(c)) &&
+                    c != 'e' && c != 'E') {
+                    hasAlpha = true;
+                    break;
+                }
+            }
+            if (!hasAlpha) {
+                try {
+                    if (token.find('.') != std::string::npos || token.find('e') != std::string::npos ||
+                        token.find('E') != std::string::npos) {
+                        d << "v" << std::stod(token);
+                    } else {
+                        d << "v" << static_cast<std::int64_t>(std::stoll(token));
+                    }
+                    return d << finalize;
+                } catch (...) {
+                }
+            }
+            d << "v" << token;
             return d << finalize;
         }
 
-        const size_t kwStart = i;
-        while (i < s.size() && std::isalpha(static_cast<unsigned char>(s[i]))) {
-            ++i;
-        }
-        const std::string kw = std::string(s.substr(kwStart, i - kwStart));
-        document d;
-        if (iequals(kw, "true")) {
-            d << "v" << true;
-            return d << finalize;
-        }
-        if (iequals(kw, "false")) {
-            d << "v" << false;
-            return d << finalize;
-        }
-        if (iequals(kw, "null")) {
-            d << "v" << bsoncxx::types::b_null{};
-            return d << finalize;
-        }
         return std::nullopt;
     }
 
@@ -338,21 +391,21 @@ namespace {
         const auto valueElem = valueDoc->view()["v"];
         document d;
         if (op == "=") {
-            appendElementValue(d << field, valueElem);
+            appendFilterValue(d << field, field, valueElem);
         } else if (op == "!=" || op == "<>") {
-            appendElementValue(d << field << open_document << "$ne", valueElem);
+            appendFilterValue(d << field << open_document << "$ne", field, valueElem);
             d << close_document;
         } else if (op == "<") {
-            appendElementValue(d << field << open_document << "$lt", valueElem);
+            appendFilterValue(d << field << open_document << "$lt", field, valueElem);
             d << close_document;
         } else if (op == ">") {
-            appendElementValue(d << field << open_document << "$gt", valueElem);
+            appendFilterValue(d << field << open_document << "$gt", field, valueElem);
             d << close_document;
         } else if (op == "<=") {
-            appendElementValue(d << field << open_document << "$lte", valueElem);
+            appendFilterValue(d << field << open_document << "$lte", field, valueElem);
             d << close_document;
         } else if (op == ">=") {
-            appendElementValue(d << field << open_document << "$gte", valueElem);
+            appendFilterValue(d << field << open_document << "$gte", field, valueElem);
             d << close_document;
         }
         return d << finalize;
@@ -404,29 +457,65 @@ namespace {
         return out << finalize;
     }
 
-    std::optional<bsoncxx::document::value> parseSqlStyleFilter(std::string filter) {
-        filter = trim(filter);
-        if (filter.empty()) {
+    std::optional<bsoncxx::document::value> parseFilterExpr(std::string expr) {
+        expr = stripOuterParens(trim(expr));
+        if (expr.empty()) {
             return document{} << finalize;
         }
 
-        const auto orParts = splitTopLevel(filter, "OR");
-        std::vector<bsoncxx::document::value> orDocs;
-        for (const auto& orPart : orParts) {
-            const auto andParts = splitTopLevel(orPart, "AND");
-            std::vector<bsoncxx::document::value> andDocs;
-            for (const auto& andPart : andParts) {
-                auto cond = parseCondition(andPart);
-                if (!cond) {
+        const auto orParts = splitTopLevel(expr, "OR");
+        if (orParts.size() > 1) {
+            std::vector<bsoncxx::document::value> docs;
+            docs.reserve(orParts.size());
+            for (const auto& part : orParts) {
+                auto doc = parseFilterExpr(part);
+                if (!doc) {
                     return std::nullopt;
                 }
-                andDocs.push_back(std::move(*cond));
+                docs.push_back(std::move(*doc));
             }
-            orDocs.push_back(combineConditions(std::move(andDocs), "$and"));
+            return combineConditions(std::move(docs), "$or");
         }
-        return combineConditions(std::move(orDocs), "$or");
+
+        const auto andParts = splitTopLevel(expr, "AND");
+        if (andParts.size() > 1) {
+            std::vector<bsoncxx::document::value> docs;
+            docs.reserve(andParts.size());
+            for (const auto& part : andParts) {
+                auto doc = parseFilterExpr(part);
+                if (!doc) {
+                    return std::nullopt;
+                }
+                docs.push_back(std::move(*doc));
+            }
+            return combineConditions(std::move(docs), "$and");
+        }
+
+        return parseCondition(expr);
+    }
+
+    std::optional<bsoncxx::document::value> parseSqlStyleFilter(std::string filter) {
+        return parseFilterExpr(std::move(filter));
     }
 } // namespace
+
+bool isValidMongoFilter(const std::string& filter) {
+    const std::string trimmed = trim(filter);
+    if (trimmed.empty()) {
+        return true;
+    }
+
+    if (trimmed.front() == '{') {
+        try {
+            bsoncxx::from_json(trimmed);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    return parseSqlStyleFilter(trimmed).has_value();
+}
 
 bsoncxx::document::value parseMongoFilter(const std::string& filter) {
     const std::string trimmed = trim(filter);

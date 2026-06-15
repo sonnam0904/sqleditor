@@ -1,4 +1,5 @@
 #include "database/postgresql.hpp"
+#include "database/server_version.hpp"
 #include "database/db.hpp"
 #include "database/ddl_utils.hpp"
 #include "database/sql_builder.hpp"
@@ -24,6 +25,19 @@ namespace {
             return std::string(NULL_SENTINEL);
         }
         return PQgetvalue(res, row, col);
+    }
+
+    void cancelPostgresConnection(PGconn* conn) {
+        if (!conn) {
+            return;
+        }
+        PGcancel* cancel = PQgetCancel(conn);
+        if (!cancel) {
+            return;
+        }
+        char errbuf[256]{};
+        PQcancel(cancel, errbuf, sizeof(errbuf));
+        PQfreeCancel(cancel);
     }
 
     // Extract a single StatementResult from a PGresult
@@ -143,11 +157,22 @@ std::pair<bool, std::string> PostgresDatabase::connect() {
 
     try {
         ensureConnectionPoolForDatabase(connectionInfo);
-        spdlog::debug("Successfully connected to PostgreSQL database: {}", connectionInfo.database);
         connected = true;
         setLastConnectionError("");
 
-        // Start loading databases immediately if showAllDatabases is enabled
+        db_version::fetchAndStoreServerVersion(*this);
+        spdlog::debug("Successfully connected to PostgreSQL database: {} (version {})",
+                      connectionInfo.database, serverVersion_);
+
+        {
+            std::lock_guard lock(sessionMutex);
+            for (auto& dbDataPtr : databaseDataCache | std::views::values) {
+                if (dbDataPtr) {
+                    dbDataPtr->ensureConnectionPool();
+                }
+            }
+        }
+
         if (connectionInfo.showAllDatabases && !databasesLoaded && !databasesLoader.isRunning()) {
             spdlog::debug("Starting async database loading after connection...");
             refreshDatabaseNames();
@@ -169,24 +194,48 @@ std::pair<bool, std::string> PostgresDatabase::connect() {
 }
 
 void PostgresDatabase::disconnect() {
+    connectionOp.cancel();
+    databasesLoader.cancel();
+    refreshWorkflow.cancel();
+
     if (AsyncOperationControl::skipWaitOnDestroy().load(std::memory_order_relaxed)) {
         std::unique_lock lock(sessionMutex, std::try_to_lock);
         if (!lock.owns_lock()) {
             spdlog::warn("PostgresDatabase::disconnect: skipping pool teardown during shutdown "
                          "(connection setup still in progress)");
             connected = false;
+            clearServerVersion();
             return;
         }
 
-        // Clear all connection pools
         for (auto& dbDataPtr : databaseDataCache | std::views::values) {
             if (dbDataPtr) {
+                dbDataPtr->cancelPendingAsyncWork();
                 dbDataPtr->connectionPool.reset();
+                for (auto& schema : dbDataPtr->schemas) {
+                    if (schema) {
+                        schema->tablesLoaded = false;
+                        schema->viewsLoaded = false;
+                        schema->materializedViewsLoaded = false;
+                        schema->sequencesLoaded = false;
+                        schema->routinesLoaded = false;
+                    }
+                }
             }
         }
         stopSshTunnel();
         connected = false;
+        clearServerVersion();
         return;
+    }
+
+    {
+        std::lock_guard lock(sessionMutex);
+        for (auto& dbDataPtr : databaseDataCache | std::views::values) {
+            if (dbDataPtr) {
+                dbDataPtr->cancelPendingAsyncWork();
+            }
+        }
     }
 
     std::lock_guard lock(sessionMutex);
@@ -194,10 +243,20 @@ void PostgresDatabase::disconnect() {
     for (auto& dbDataPtr : databaseDataCache | std::views::values) {
         if (dbDataPtr) {
             dbDataPtr->connectionPool.reset();
+            for (auto& schema : dbDataPtr->schemas) {
+                if (schema) {
+                    schema->tablesLoaded = false;
+                    schema->viewsLoaded = false;
+                    schema->materializedViewsLoaded = false;
+                    schema->sequencesLoaded = false;
+                    schema->routinesLoaded = false;
+                }
+            }
         }
     }
     stopSshTunnel();
     connected = false;
+    clearServerVersion();
 }
 
 void PostgresDatabase::refreshConnection() {
@@ -484,7 +543,9 @@ void PostgresDatabase::ensureConnectionPoolForDatabase(const DatabaseConnectionI
         // closer
         [](PGconn* conn) { PQfinish(conn); },
         // validator
-        [](const PGconn* conn) { return PQstatus(conn) == CONNECTION_OK; });
+        [](const PGconn* conn) { return PQstatus(conn) == CONNECTION_OK; },
+        ConnectionPool<PGconn*>::DEFAULT_POOL_SIZE, 3,
+        [](PGconn* conn) { cancelPostgresConnection(conn); });
 
     std::lock_guard lock(sessionMutex);
     auto* dbData = getDatabaseData(info.database);

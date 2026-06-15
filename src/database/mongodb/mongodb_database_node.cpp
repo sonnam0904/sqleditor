@@ -1,74 +1,17 @@
+#include "database/mongodb/mongo_bson_format.hpp"
 #include "database/mongodb/mongo_filter.hpp"
 #include "database/mongodb/mongodb_database_node.hpp"
 #include "database/mongodb.hpp"
 #include <algorithm>
 #include <chrono>
 #include <format>
-#include <set>
+#include <unordered_set>
 #include <spdlog/spdlog.h>
 
 #include <bsoncxx/builder/stream/document.hpp>
 #include <bsoncxx/json.hpp>
 #include <bsoncxx/types.hpp>
 #include <mongocxx/client.hpp>
-
-namespace {
-
-    // Convert a BSON element to a human-readable string
-    std::string bsonElementToString(const bsoncxx::document::element& elem) {
-        if (!elem) {
-            return "";
-        }
-
-        switch (elem.type()) {
-        case bsoncxx::type::k_string:
-            return std::string(elem.get_string().value);
-        case bsoncxx::type::k_int32:
-            return std::to_string(elem.get_int32().value);
-        case bsoncxx::type::k_int64:
-            return std::to_string(elem.get_int64().value);
-        case bsoncxx::type::k_double:
-            return std::to_string(elem.get_double().value);
-        case bsoncxx::type::k_bool:
-            return elem.get_bool().value ? "true" : "false";
-        case bsoncxx::type::k_oid:
-            return elem.get_oid().value.to_string();
-        case bsoncxx::type::k_date: {
-            // Convert milliseconds since epoch to ISO 8601 format
-            const auto millis = elem.get_date().value.count();
-            const auto seconds = millis / 1000;
-            const auto time = static_cast<std::time_t>(seconds);
-            std::tm tm{};
-#ifdef _WIN32
-            gmtime_s(&tm, &time);
-#else
-            gmtime_r(&time, &tm);
-#endif
-            char buf[32];
-            std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
-            return std::string(buf);
-        }
-        case bsoncxx::type::k_null:
-            return std::string(NULL_SENTINEL);
-        case bsoncxx::type::k_decimal128:
-            return elem.get_decimal128().value.to_string();
-        case bsoncxx::type::k_document:
-            return bsoncxx::to_json(elem.get_document().value);
-        case bsoncxx::type::k_array:
-            return bsoncxx::to_json(elem.get_array().value);
-        default:
-            // For any other types, wrap in a document to convert to JSON
-            try {
-                auto wrapper = bsoncxx::builder::stream::document{}
-                               << "v" << elem.get_value() << bsoncxx::builder::stream::finalize;
-                return bsoncxx::to_json(wrapper.view());
-            } catch (...) {
-                return "<unknown>";
-            }
-        }
-    }
-
-} // namespace
 
 DatabaseInterface* MongoDBDatabaseNode::ownerDatabase() const {
     return parentDb;
@@ -174,7 +117,7 @@ std::vector<Table> MongoDBDatabaseNode::getCollectionsAsync() {
 std::vector<Column> MongoDBDatabaseNode::inferSchemaFromSample(const std::string& collectionName,
                                                                int sampleSize) {
     std::vector<Column> columns;
-    std::set<std::string> seenFields;
+    std::unordered_set<std::string> seenFields;
 
     try {
         auto client = parentDb->getClient();
@@ -189,10 +132,9 @@ std::vector<Column> MongoDBDatabaseNode::inferSchemaFromSample(const std::string
         for (auto&& doc : cursor) {
             for (auto&& elem : doc) {
                 std::string fieldName(elem.key());
-                if (seenFields.contains(fieldName)) {
+                if (!seenFields.insert(fieldName).second) {
                     continue;
                 }
-                seenFields.insert(fieldName);
 
                 Column col;
                 col.name = fieldName;
@@ -249,15 +191,6 @@ std::vector<Column> MongoDBDatabaseNode::inferSchemaFromSample(const std::string
                 columns.push_back(col);
             }
         }
-
-        // Sort columns with _id first
-        std::ranges::sort(columns, [](const Column& a, const Column& b) {
-            if (a.name == "_id")
-                return true;
-            if (b.name == "_id")
-                return false;
-            return a.name < b.name;
-        });
 
     } catch (const std::exception& e) {
         spdlog::error("Error inferring schema for {}: {}", collectionName, e.what());
@@ -408,7 +341,7 @@ MongoDBDatabaseNode::getTableData(const Table& collection, const int limit, cons
             // Extract value for each column
             for (const auto& colName : columnNames) {
                 if (auto elem = doc[colName]) {
-                    row.push_back(bsonElementToString(elem));
+                    row.push_back(mongo_bson::elementToDisplayString(elem));
                 } else {
                     row.push_back(""); // Field not present in this document
                 }
@@ -418,6 +351,41 @@ MongoDBDatabaseNode::getTableData(const Table& collection, const int limit, cons
         }
     } catch (const std::exception& e) {
         spdlog::error("Error getting collection data for {}: {}", collectionName, e.what());
+    }
+
+    return result;
+}
+
+std::vector<std::string>
+MongoDBDatabaseNode::getCollectionDocumentsAsJson(const Table& collection, const int limit,
+                                                  const int offset, const std::string& filter,
+                                                  const std::string& sort) {
+    std::vector<std::string> result;
+    const std::string& collectionName = collection.name;
+
+    try {
+        auto client = parentDb->getClient();
+        auto db = (*client)[name];
+        auto coll = db[collectionName];
+
+        mongocxx::options::find opts;
+        opts.limit(limit);
+        opts.skip(offset);
+
+        bsoncxx::document::value filterDoc = parseMongoFilter(filter);
+        if (!sort.empty()) {
+            const auto sortDoc = parseMongoSort(sort);
+            if (!sortDoc.view().empty()) {
+                opts.sort(sortDoc.view());
+            }
+        }
+
+        auto cursor = coll.find(filterDoc.view(), opts);
+        for (auto&& doc : cursor) {
+            result.push_back(bsoncxx::to_json(doc));
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("Error getting collection JSON for {}: {}", collectionName, e.what());
     }
 
     return result;
@@ -458,9 +426,8 @@ int MongoDBDatabaseNode::getRowCount(const Table& collection, const std::string&
 }
 
 QueryResult MongoDBDatabaseNode::executeQuery(const std::string& query, const int rowLimit) {
-    // Delegate to parent for JSON command execution
     if (parentDb) {
-        return parentDb->executeQuery(query, rowLimit);
+        return parentDb->executeQueryForDatabase(query, rowLimit, name);
     }
 
     QueryResult result;

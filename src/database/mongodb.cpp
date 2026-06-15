@@ -1,7 +1,238 @@
 #include "database/mongodb.hpp"
+#include "database/mongodb/mongo_bson_format.hpp"
+#include "database/mongodb/mongo_shell.hpp"
+#include "database/server_version.hpp"
+#include <bsoncxx/json.hpp>
 #include <format>
 #include <ranges>
 #include <spdlog/spdlog.h>
+
+namespace {
+    std::string trimLiteral(std::string_view s) {
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+            s.remove_prefix(1);
+        }
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+            s.remove_suffix(1);
+        }
+        return std::string(s);
+    }
+
+    bsoncxx::document::view_or_value parseShellDocument(std::string_view literal) {
+        if (trimLiteral(literal).empty()) {
+            return bsoncxx::builder::stream::document{} << bsoncxx::builder::stream::finalize;
+        }
+        return bsoncxx::from_json(shellLiteralToExtendedJson(literal));
+    }
+
+    bsoncxx::document::value parseShellBson(std::string_view literal) {
+        return bsoncxx::from_json(shellLiteralToExtendedJson(literal));
+    }
+
+    bool iequals(std::string_view a, std::string_view b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::string fetchMongoServerVersion(mongocxx::client& client, std::string_view preferredDb) {
+        const auto tryBuildInfo = [&](const std::string& dbName) -> std::string {
+            auto database = client[dbName];
+            bsoncxx::builder::stream::document cmd;
+            cmd << "buildInfo" << 1;
+            const auto result = database.run_command(cmd.view());
+            const auto view = result.view();
+            if (view["version"]) {
+                return std::string(view["version"].get_string().value);
+            }
+            return {};
+        };
+
+        try {
+            if (!preferredDb.empty()) {
+                if (auto version = tryBuildInfo(std::string(preferredDb)); !version.empty()) {
+                    return version;
+                }
+            }
+            if (auto version = tryBuildInfo("admin"); !version.empty()) {
+                return version;
+            }
+            return tryBuildInfo("test");
+        } catch (const std::exception& e) {
+            spdlog::warn("Failed to read MongoDB server version: {}", e.what());
+        }
+        return {};
+    }
+
+    void appendFindRows(StatementResult& s, mongocxx::cursor& cursor) {
+        mongo_bson::appendCursorAsTable(s, cursor);
+    }
+
+    bool executeMongoShellCommand(const MongoShellCommand& cmd, mongocxx::database& db,
+                                  StatementResult& s, int rowLimit) {
+        const auto& method = cmd.method;
+
+        if (iequals(method, "createCollection")) {
+            if (cmd.args.empty()) {
+                s.success = false;
+                s.errorMessage = "createCollection requires a collection name";
+                return false;
+            }
+            std::string collName = trimLiteral(cmd.args.front());
+            if (collName.size() >= 2 &&
+                ((collName.front() == '"' && collName.back() == '"') ||
+                 (collName.front() == '\'' && collName.back() == '\''))) {
+                collName = collName.substr(1, collName.size() - 2);
+            }
+            db.create_collection(collName);
+            s.message = "Collection created successfully";
+            return true;
+        }
+
+        if (iequals(method, "runCommand")) {
+            if (cmd.args.empty()) {
+                s.success = false;
+                s.errorMessage = "runCommand requires a document argument";
+                return false;
+            }
+            auto cmdResult = db.run_command(parseShellDocument(cmd.args.front()));
+            s.columnNames.push_back("result");
+            std::vector<std::string> row;
+            row.push_back(bsoncxx::to_json(cmdResult.view()));
+            s.tableData.push_back(std::move(row));
+            s.message = "Command executed successfully";
+            return true;
+        }
+
+        if (cmd.collection.empty()) {
+            s.success = false;
+            s.errorMessage = std::format("Unknown db command: db.{}()", method);
+            return false;
+        }
+
+        auto coll = db[cmd.collection];
+        const int effectiveLimit = cmd.limit >= 0 ? cmd.limit : rowLimit;
+
+        if (iequals(method, "find") || iequals(method, "findOne")) {
+            bsoncxx::document::view_or_value filter = parseShellDocument(
+                cmd.args.empty() ? "{}" : cmd.args[0]);
+            mongocxx::options::find opts;
+            opts.limit(iequals(method, "findOne") ? 1 : effectiveLimit);
+            if (cmd.skip > 0) {
+                opts.skip(cmd.skip);
+            }
+            auto cursor = coll.find(filter, opts);
+            appendFindRows(s, cursor);
+            return true;
+        }
+
+        if (iequals(method, "aggregate")) {
+            mongocxx::pipeline pipeline;
+            if (!cmd.args.empty()) {
+                const auto pipelineValue = parseShellBson(cmd.args[0]);
+                for (auto&& stage : pipelineValue.view()) {
+                    pipeline.append_stage(stage.get_document().value);
+                }
+            }
+            auto cursor = coll.aggregate(pipeline);
+            appendFindRows(s, cursor);
+            return true;
+        }
+
+        if (iequals(method, "insertOne")) {
+            if (cmd.args.empty()) {
+                s.success = false;
+                s.errorMessage = "insertOne requires a document argument";
+                return false;
+            }
+            coll.insert_one(parseShellDocument(cmd.args.front()));
+            s.message = "Insert executed successfully";
+            return true;
+        }
+
+        if (iequals(method, "insertMany")) {
+            if (cmd.args.empty()) {
+                s.success = false;
+                s.errorMessage = "insertMany requires an array argument";
+                return false;
+            }
+            std::vector<bsoncxx::document::view> docs;
+            for (auto&& d : parseShellBson(cmd.args.front()).view()) {
+                docs.push_back(d.get_document().value);
+            }
+            coll.insert_many(docs);
+            s.message = std::format("Inserted {} document{}", docs.size(),
+                                    docs.size() == 1 ? "" : "s");
+            return true;
+        }
+
+        if (iequals(method, "updateOne") || iequals(method, "updateMany")) {
+            if (cmd.args.size() < 2) {
+                s.success = false;
+                s.errorMessage = std::format("{} requires filter and update arguments", method);
+                return false;
+            }
+            const auto filter = parseShellDocument(cmd.args[0]);
+            const auto update = parseShellDocument(cmd.args[1]);
+            if (iequals(method, "updateOne")) {
+                auto result = coll.update_one(filter, update);
+                s.affectedRows = result ? static_cast<int>(result->modified_count()) : 0;
+            } else {
+                auto result = coll.update_many(filter, update);
+                s.affectedRows = result ? static_cast<int>(result->modified_count()) : 0;
+            }
+            s.message = std::format("Updated {} document{}", s.affectedRows,
+                                    s.affectedRows == 1 ? "" : "s");
+            return true;
+        }
+
+        if (iequals(method, "deleteOne") || iequals(method, "deleteMany")) {
+            if (cmd.args.empty()) {
+                s.success = false;
+                s.errorMessage = std::format("{} requires a filter argument", method);
+                return false;
+            }
+            const auto filter = parseShellDocument(cmd.args[0]);
+            if (iequals(method, "deleteOne")) {
+                auto result = coll.delete_one(filter);
+                s.affectedRows = result ? static_cast<int>(result->deleted_count()) : 0;
+            } else {
+                auto result = coll.delete_many(filter);
+                s.affectedRows = result ? static_cast<int>(result->deleted_count()) : 0;
+            }
+            s.message = std::format("Deleted {} document{}", s.affectedRows,
+                                    s.affectedRows == 1 ? "" : "s");
+            return true;
+        }
+
+        if (iequals(method, "count") || iequals(method, "countDocuments")) {
+            bsoncxx::document::view_or_value filter = parseShellDocument(
+                cmd.args.empty() ? "{}" : cmd.args[0]);
+            const auto count = coll.count_documents(filter);
+            s.columnNames.push_back("count");
+            s.tableData.push_back({std::to_string(count)});
+            s.message = std::format("Count: {}", count);
+            return true;
+        }
+
+        if (iequals(method, "drop")) {
+            coll.drop();
+            s.message = "Collection dropped successfully";
+            return true;
+        }
+
+        s.success = false;
+        s.errorMessage = std::format("Unsupported shell method: {}", method);
+        return false;
+    }
+} // namespace
 
 mongocxx::instance& MongoDBDatabase::getDriverInstance() {
     static mongocxx::instance instance{};
@@ -63,17 +294,24 @@ std::pair<bool, std::string> MongoDBDatabase::connect() {
         std::string uri = connectionInfo.buildConnectionString();
         spdlog::debug("Connecting to MongoDB: {}", uri);
 
-        std::lock_guard lock(poolMutex);
-        connectionPool = std::make_unique<mongocxx::pool>(mongocxx::uri{uri});
+        {
+            std::lock_guard lock(poolMutex);
+            connectionPool = std::make_unique<mongocxx::pool>(mongocxx::uri{uri});
+        }
 
-        // Test connection by getting a client and listing databases
-        const auto client = connectionPool->acquire();
-        auto databases = client->list_database_names();
-
-        spdlog::debug("Successfully connected to MongoDB at {}:{}", connectionInfo.host,
-                      connectionInfo.port);
         connected = true;
         setLastConnectionError("");
+
+        db_version::fetchAndStoreServerVersion(*this);
+        if (serverVersion_.empty()) {
+            std::lock_guard lock(poolMutex);
+            connectionPool.reset();
+            connected = false;
+            return {false, "MongoDB connection failed: unable to read server version"};
+        }
+
+        spdlog::debug("Successfully connected to MongoDB at {}:{} (version {})",
+                      connectionInfo.host, connectionInfo.port, serverVersion_);
 
         // Start loading databases if showAllDatabases is enabled
         if (connectionInfo.showAllDatabases && !databasesLoaded && !databasesLoader.isRunning()) {
@@ -87,6 +325,7 @@ std::pair<bool, std::string> MongoDBDatabase::connect() {
         std::lock_guard lock(poolMutex);
         connectionPool.reset();
         connected = false;
+        clearServerVersion();
         std::string error = "MongoDB connection failed: " + std::string(e.what());
         setLastConnectionError(error);
         return {false, error};
@@ -98,6 +337,7 @@ void MongoDBDatabase::disconnect() {
     connectionPool.reset();
     stopSshTunnel();
     connected = false;
+    clearServerVersion();
 }
 
 void MongoDBDatabase::refreshConnection() {
@@ -130,6 +370,11 @@ void MongoDBDatabase::refreshConnection() {
 }
 
 QueryResult MongoDBDatabase::executeQuery(const std::string& query, int rowLimit) {
+    return executeQueryForDatabase(query, rowLimit, connectionInfo.database);
+}
+
+QueryResult MongoDBDatabase::executeQueryForDatabase(const std::string& query, int rowLimit,
+                                                     const std::string& dbName) {
     QueryResult result;
     StatementResult s;
     const auto startTime = std::chrono::high_resolution_clock::now();
@@ -142,18 +387,27 @@ QueryResult MongoDBDatabase::executeQuery(const std::string& query, int rowLimit
     }
 
     try {
-        // Parse JSON query - expected format:
+        const std::string trimmedQuery = trimLiteral(query);
+        if (auto shellCmd = tryParseMongoShell(trimmedQuery)) {
+            auto client = getClient();
+            auto db = (*client)[dbName];
+            if (!executeMongoShellCommand(*shellCmd, db, s, rowLimit)) {
+                result.statements.push_back(std::move(s));
+                return result;
+            }
+        } else if (!trimmedQuery.empty() && trimmedQuery.front() == '{') {
+        // Legacy JSON query format:
         // { "database": "db", "collection": "coll", "command": "find", "filter": {} }
-        auto doc = bsoncxx::from_json(query);
+        auto doc = bsoncxx::from_json(trimmedQuery);
         auto view = doc.view();
 
-        std::string dbName = connectionInfo.database;
+        std::string effectiveDbName = dbName;
+        if (view["database"]) {
+            effectiveDbName = std::string(view["database"].get_string().value);
+        }
         std::string collName;
         std::string command = "find";
 
-        if (view["database"]) {
-            dbName = std::string(view["database"].get_string().value);
-        }
         if (view["collection"]) {
             collName = std::string(view["collection"].get_string().value);
         }
@@ -162,7 +416,7 @@ QueryResult MongoDBDatabase::executeQuery(const std::string& query, int rowLimit
         }
 
         auto client = getClient();
-        auto db = (*client)[dbName];
+        auto db = (*client)[effectiveDbName];
 
         if (command == "find" && !collName.empty()) {
             auto coll = db[collName];
@@ -177,27 +431,7 @@ QueryResult MongoDBDatabase::executeQuery(const std::string& query, int rowLimit
             opts.limit(rowLimit);
 
             auto cursor = coll.find(filter, opts);
-
-            // Build result from cursor
-            s.columnNames.push_back("_id");
-            s.columnNames.push_back("document");
-
-            for (auto&& doc : cursor) {
-                std::vector<std::string> row;
-                if (doc["_id"]) {
-                    auto idDoc = bsoncxx::builder::stream::document{}
-                                 << "_id" << doc["_id"].get_value()
-                                 << bsoncxx::builder::stream::finalize;
-                    row.push_back(bsoncxx::to_json(idDoc.view()));
-                } else {
-                    row.push_back("");
-                }
-                row.push_back(bsoncxx::to_json(doc));
-                s.tableData.push_back(std::move(row));
-            }
-
-            s.message = std::format("Returned {} document{}", s.tableData.size(),
-                                    s.tableData.size() == 1 ? "" : "s");
+            appendFindRows(s, cursor);
         } else if (command == "aggregate" && !collName.empty()) {
             auto coll = db[collName];
 
@@ -209,16 +443,7 @@ QueryResult MongoDBDatabase::executeQuery(const std::string& query, int rowLimit
             }
 
             auto cursor = coll.aggregate(pipeline);
-
-            s.columnNames.push_back("document");
-            for (auto&& doc : cursor) {
-                std::vector<std::string> row;
-                row.push_back(bsoncxx::to_json(doc));
-                s.tableData.push_back(std::move(row));
-            }
-
-            s.message = std::format("Returned {} document{}", s.tableData.size(),
-                                    s.tableData.size() == 1 ? "" : "s");
+            appendFindRows(s, cursor);
         } else if (command == "insert" && !collName.empty()) {
             auto coll = db[collName];
             if (view["document"]) {
@@ -260,10 +485,22 @@ QueryResult MongoDBDatabase::executeQuery(const std::string& query, int rowLimit
                 row.push_back(bsoncxx::to_json(cmdResult.view()));
                 s.tableData.push_back(std::move(row));
                 s.message = "Command executed successfully";
+            } else {
+                s.success = false;
+                s.errorMessage = "runCommand requires commandDoc";
+                result.statements.push_back(std::move(s));
+                return result;
             }
         } else {
             s.success = false;
             s.errorMessage = "Unknown command or missing collection name";
+            result.statements.push_back(std::move(s));
+            return result;
+        }
+        } else {
+            s.success = false;
+            s.errorMessage =
+                "Invalid MongoDB query. Use shell syntax, e.g. db.collection.find({})";
             result.statements.push_back(std::move(s));
             return result;
         }
@@ -415,4 +652,14 @@ mongocxx::pool::entry MongoDBDatabase::getClient() const {
         throw std::runtime_error("MongoDBDatabase::getClient: Connection pool not available");
     }
     return connectionPool->acquire();
+}
+
+std::string MongoDBDatabase::readServerVersion() const {
+    try {
+        const auto client = getClient();
+        return fetchMongoServerVersion(*client, connectionInfo.database);
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to read MongoDB server version: {}", e.what());
+        return {};
+    }
 }

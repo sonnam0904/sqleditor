@@ -691,6 +691,7 @@ SQLEditorTab::SQLEditorTab(const std::string& name, IDatabaseNode* node,
     : Tab(name, TabType::SQL_EDITOR), node_(node), selectedSchemaName(schemaName),
       scriptName_(name) {
     sqlEditor.SetShowLineNumbers(true);
+    sqlEditor.SetLanguage(sqleditor::TextEditor::Language::SQL);
     sqlEditor.SetSubmitCallback([this] {
         if (sqlEditor.HasSelection()) {
             startQueryExecutionAsync(sqlEditor.GetSelectedText());

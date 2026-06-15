@@ -80,6 +80,10 @@ public:
     std::vector<std::vector<std::string>> getTableData(const Table& collection, int limit,
                                                        int offset, const std::string& filter = "",
                                                        const std::string& sort = "") override;
+    std::vector<std::string> getCollectionDocumentsAsJson(const Table& collection, int limit,
+                                                          int offset,
+                                                          const std::string& filter = "",
+                                                          const std::string& sort = "");
     std::vector<std::string> getColumnNames(const Table& collection) override;
     int getRowCount(const Table& collection, const std::string& filter = "") override;
 

@@ -176,7 +176,13 @@ public:
             running = false;
             waitForOperation(*activeOperation);
             if (callback) {
-                callback(activeOperation->future.get());
+                try {
+                    callback(activeOperation->future.get());
+                } catch (const std::exception& e) {
+                    spdlog::error("AsyncOperation callback failed: {}", e.what());
+                } catch (...) {
+                    spdlog::error("AsyncOperation callback failed with unknown error");
+                }
                 activeOperation.reset();
             }
             reapZombies();

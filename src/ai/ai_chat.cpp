@@ -173,11 +173,12 @@ std::string AIChatState::buildSystemPrompt(std::stop_token stopToken) const {
 
     if (isMongo) {
         return std::format("You are a MongoDB query assistant.\n"
-                           "Generate valid JSON queries for MongoDB. The query format is:\n"
-                           "{{\"collection\": \"name\", \"command\": \"find\", \"filter\": {{}}}}\n"
-                           "Supported commands: find, aggregate, insert, update, delete, "
-                           "createCollection, dropCollection, runCommand.\n"
-                           "Put queries in ```json code blocks. Be concise.\n\n"
+                           "Generate valid mongosh shell queries. Examples:\n"
+                           "  db.users.find({{ status: \"active\" }})\n"
+                           "  db.users.aggregate([{{ $match: {{}} }}])\n"
+                           "  db.users.insertOne({{ name: \"test\" }})\n"
+                           "  db.users.updateMany({{ a: 1 }}, {{ $set: {{ b: 2 }} }})\n"
+                           "Put queries in ```javascript code blocks. Be concise.\n\n"
                            "Current query in editor:\n{}\n\n"
                            "Collections:\n{}",
                            currentSQL_.empty() ? "// empty" : currentSQL_, schema);

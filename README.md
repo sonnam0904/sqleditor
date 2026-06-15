@@ -27,17 +27,27 @@ Download pre-built binaries from [GitHub Releases](https://github.com/sonnam0904
  
 ### Troubleshooting on Linux
 
-SQLEditor uses GTK4 + OpenGL (`GtkGLArea`). If the app fails to open a window, exits immediately, or reports an OpenGL context error, try the steps below.
+SQLEditor uses GTK4 + OpenGL ES via EGL (`GtkGLArea`). On NVIDIA GPUs the app automatically selects the NVIDIA GL/EGL stack. If the app fails to open a window, exits immediately, or reports an OpenGL context error, try the steps below.
 
 **NVIDIA GPU (Ubuntu / Debian)**
 
-`GtkGLArea` needs EGL + GBM. On NVIDIA drivers, the bridge library is often missing:
+`GtkGLArea` needs EGL + GBM. SQLEditor sets NVIDIA GLVND/EGL environment variables automatically when the proprietary driver is loaded. If context creation still fails, install the GBM bridge library:
 
 ```sh
 sudo apt install libnvidia-egl-gbm1
 ```
 
 Then launch the app again. This is a **runtime** dependency (needed when running the app), not required to compile. `./scripts/setup` installs it automatically when the package is available in your apt repositories.
+
+**Paste from other applications (clipboard)**
+
+SQLEditor reads the system clipboard via `wl-paste` (Wayland) and `xclip` (X11). Install both for reliable copy/paste across desktop environments:
+
+```sh
+sudo apt install wl-clipboard xclip
+```
+
+`./scripts/setup` installs these automatically on Ubuntu/Debian/Fedora. The Linux AppImage also bundles them when built on a machine that has the packages installed.
 
 **AppImage will not start**
 

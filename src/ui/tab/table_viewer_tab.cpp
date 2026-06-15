@@ -1,11 +1,17 @@
 #include "ui/tab/table_viewer_tab.hpp"
 #include "IconsFontAwesome6.h"
+#include "IconsForkAwesome.h"
 #include "application.hpp"
 #include "database/database_node.hpp"
 #include "database/ddl_utils.hpp"
+#include "database/mongodb/mongo_bson_format.hpp"
+#include "database/mongodb/mongo_filter.hpp"
+#include "database/mongodb/mongodb_database_node.hpp"
 #include "database/sql_builder.hpp"
 #include "imgui.h"
 #include "themes.hpp"
+#include "ui/json_tree_view.hpp"
+#include "ui/ui_widgets.hpp"
 #include "ui/query_history.hpp"
 #include "utils/spinner.hpp"
 #include <algorithm>
@@ -15,6 +21,7 @@
 #include <iostream>
 #include <spdlog/spdlog.h>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace {
@@ -56,6 +63,54 @@ namespace {
         return "'" + ddl_utils::escapeSingleQuotes(val) + "'";
     }
 
+    std::string sqlColumnTypeLabel(std::string type) {
+        while (!type.empty() && std::isspace(static_cast<unsigned char>(type.front()))) {
+            type.erase(type.begin());
+        }
+        while (!type.empty() && std::isspace(static_cast<unsigned char>(type.back()))) {
+            type.pop_back();
+        }
+        if (type.empty()) {
+            return type;
+        }
+
+        std::string params;
+        if (const auto paren = type.find('('); paren != std::string::npos) {
+            params = type.substr(paren);
+            type.resize(paren);
+        }
+
+        std::string lower;
+        lower.reserve(type.size());
+        for (char c : type) {
+            lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+
+        static const std::unordered_map<std::string, std::string> aliases = {
+            {"character varying", "varchar"},
+            {"character", "char"},
+            {"timestamp without time zone", "timestamp"},
+            {"timestamp with time zone", "timestamptz"},
+            {"time without time zone", "time"},
+            {"time with time zone", "timetz"},
+            {"double precision", "float8"},
+            {"boolean", "bool"},
+            {"bit varying", "varbit"},
+        };
+
+        if (const auto it = aliases.find(lower); it != aliases.end()) {
+            return it->second + params;
+        }
+        return type + params;
+    }
+
+    std::string columnTypeDisplayLabel(const Column& col, bool mongo) {
+        if (mongo) {
+            return mongo_bson::mongoTypeDisplayLabel(col.type);
+        }
+        return sqlColumnTypeLabel(col.type);
+    }
+
 } // namespace
 
 TableViewerTab::TableViewerTab(const std::string& name, std::string databasePath, Table table,
@@ -79,117 +134,7 @@ void TableViewerTab::render() {
         saveChanges();
     }
 
-    ImGui::Text("Table: %s", table_.name.c_str());
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0, Theme::Spacing::XS));
-
-    // Filter input with auto-completion
-    ImGui::AlignTextToFramePadding();
-    ImGui::Text(ICON_FA_FILTER);
-    ImGui::SameLine(0, Theme::Spacing::M);
-
-    // Use the AutoCompleteInput component
-    if (filterAutoComplete &&
-        filterAutoComplete->render("##filter", filterBuffer, sizeof(filterBuffer))) {
-        applyFilter();
-    }
-
-    // Refresh, Save, Reject buttons next to filter
-    ImGui::SameLine(0, Theme::Spacing::M);
-    ImGui::PushStyleColor(ImGuiCol_Text, colors.blue);
-    if (ImGui::Button(ICON_FA_ARROWS_ROTATE)) {
-        refreshData();
-    }
-    ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Refresh");
-    }
-
-    ImGui::SameLine();
-    if (hasChanges) {
-        ImGui::PushStyleColor(ImGuiCol_Text, colors.green);
-        if (ImGui::Button(ICON_FA_FLOPPY_DISK)) {
-            saveChanges();
-        }
-        ImGui::PopStyleColor();
-    } else {
-        ImGui::BeginDisabled();
-        ImGui::Button(ICON_FA_FLOPPY_DISK);
-        ImGui::EndDisabled();
-    }
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("Save");
-    }
-
-    ImGui::SameLine();
-    if (hasChanges) {
-        ImGui::PushStyleColor(ImGuiCol_Text, colors.red);
-        if (ImGui::Button(ICON_FA_XMARK)) {
-            cancelChanges();
-        }
-        ImGui::PopStyleColor();
-    } else {
-        ImGui::BeginDisabled();
-        ImGui::Button(ICON_FA_XMARK);
-        ImGui::EndDisabled();
-    }
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("Reject changes");
-    }
-
-    ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_PLUS)) {
-        addRow();
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Add row");
-    }
-
-    const bool hasRowSelected =
-        selectedRow >= 0 && selectedRow < static_cast<int>(tableData.size());
-
-    ImGui::SameLine();
-    if (!hasRowSelected)
-        ImGui::BeginDisabled();
-    ImGui::PushStyleColor(ImGuiCol_Text, colors.blue);
-    if (ImGui::Button(ICON_FA_CLONE)) {
-        duplicateRow(selectedRow);
-    }
-    ImGui::PopStyleColor();
-    if (!hasRowSelected)
-        ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("Duplicate row");
-    }
-
-    ImGui::SameLine();
-    if (!hasRowSelected)
-        ImGui::BeginDisabled();
-    ImGui::PushStyleColor(ImGuiCol_Text, colors.red);
-    if (ImGui::Button(ICON_FA_TRASH_CAN)) {
-        deleteRow(selectedRow);
-    }
-    ImGui::PopStyleColor();
-    if (!hasRowSelected)
-        ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("Delete row");
-    }
-
-    if (hasChanges) {
-        ImGui::SameLine(0, Theme::Spacing::L);
-        ImGui::TextColored(colors.peach, "Unsaved changes");
-    }
-
-    // Show current filter if active
-    if (!currentFilter.empty()) {
-        ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "Active filter: %s",
-                           currentFilter.c_str());
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "(%d rows)", totalRows);
-    }
-
-    ImGui::Dummy(ImVec2(0, Theme::Spacing::XS));
+    renderToolbar(colors);
 
     // Show loading error if any
     if (hasLoadingError) {
@@ -204,9 +149,8 @@ void TableViewerTab::render() {
         }
     }
 
-    // Reserve space for bottom controls (pagination + action buttons)
-    const float bottomControlsHeight =
-        ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 2;
+    // Reserve space for bottom controls (pagination bar)
+    const float bottomControlsHeight = ImGui::GetFrameHeightWithSpacing() + Theme::Spacing::L * 2;
     const float availableHeight = ImGui::GetContentRegionAvail().y - bottomControlsHeight;
 
     // Horizontal layout: table area | panel content (when open) | toggle strip (always)
@@ -217,10 +161,16 @@ void TableViewerTab::render() {
     tableAreaWidth = std::max(200.0f, tableAreaWidth);
 
     // Table display in a child window to prevent cutoff
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, colors.mantle);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 6.0f));
     if (ImGui::BeginChild("TableArea", ImVec2(tableAreaWidth, availableHeight),
-                          ImGuiChildFlags_None)) {
+                          ImGuiChildFlags_Borders)) {
         if (dataLoadOp.isRunning()) {
             ImGui::Text("Loading table data...");
+        } else if (isMongoCollection() && mongoViewMode_ == MongoCollectionViewMode::Json &&
+                   !mongoDocumentJson_.empty()) {
+            renderMongoJsonView(tableAreaWidth, availableHeight);
         } else if (!table_.columns.empty() && !tableData.empty()) {
             // Update table renderer with current data
             tableRenderer->setColumns(table_.columns);
@@ -239,12 +189,16 @@ void TableViewerTab::render() {
                     "Try a different filter condition or click 'Clear Filter' to see all data.");
             } else if (hasLoadingError) {
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error loading data");
+            } else if (isMongoCollection() && mongoViewMode_ == MongoCollectionViewMode::Json) {
+                ImGui::Text("No documents to display.");
             } else {
                 ImGui::Text("No data to display. Execute a query to see results here.");
             }
         }
     }
     ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
 
     // Panel content (when open)
     if (rightPanelOpen) {
@@ -256,47 +210,207 @@ void TableViewerTab::render() {
     ImGui::SameLine(0, 0);
     renderRightPanelToggleStrip(toggleStripWidth, availableHeight);
 
-    // Pagination controls at the bottom
+    renderPaginationBar(colors);
+
+    // Check async SQL execution status
+    checkSQLExecutionStatus();
+
+    // Show save confirmation dialog if needed
+    showSaveConfirmationDialog();
+}
+
+void TableViewerTab::renderToolbar(const Theme::Colors& colors) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, colors.surface0);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::BeginChild("TableToolbar", ImVec2(-1, 0), ImGuiChildFlags_AutoResizeY);
+
+    const bool mongo = isMongoCollection();
+    const ImVec4 titleColor = mongo ? colors.green : colors.blue;
+    ImGui::PushStyleColor(ImGuiCol_Text, titleColor);
+    ImGui::Text("%s  %s", mongo ? ICON_FK_TABLE : ICON_FK_TABLE, table_.name.c_str());
+    ImGui::PopStyleColor();
+
+    const std::string rowBadge = std::format("{} rows", totalRows);
+    const ImVec2 badgeTextSize = ImGui::CalcTextSize(rowBadge.c_str());
+    const float badgeWidth = badgeTextSize.x + 16.0f;
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - badgeWidth + ImGui::GetStyle().ItemSpacing.x);
+    UIWidgets::statusBadge(rowBadge.c_str(),
+                           ImVec4(colors.blue.x, colors.blue.y, colors.blue.z, 0.18f), colors.blue);
+
+    ImGui::Dummy(ImVec2(0, Theme::Spacing::S));
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+    ImGui::Text(ICON_FA_FILTER);
+    ImGui::PopStyleColor();
+    ImGui::SameLine(0, Theme::Spacing::S);
+
+    if (filterAutoComplete) {
+        const float filterWidth =
+            std::max(280.0f, ImGui::GetContentRegionAvail().x * 0.42f);
+        filterAutoComplete->setWidth(filterWidth);
+        if (filterAutoComplete->render("##filter", filterBuffer, sizeof(filterBuffer))) {
+            applyFilter();
+        }
+    }
+
+    ImGui::SameLine(0, Theme::Spacing::S);
+    if (UIWidgets::iconToolButton("refresh", ICON_FA_ARROWS_ROTATE, colors.blue)) {
+        refreshData();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Refresh");
+    }
+
+    ImGui::SameLine();
+    if (UIWidgets::iconToolButton("save", ICON_FA_FLOPPY_DISK, colors.green, hasChanges)) {
+        saveChanges();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Save");
+    }
+
+    ImGui::SameLine();
+    if (UIWidgets::iconToolButton("reject", ICON_FA_XMARK, colors.red, hasChanges)) {
+        cancelChanges();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Reject changes");
+    }
+
+    ImGui::SameLine();
+    if (UIWidgets::iconToolButton("add", ICON_FA_PLUS, colors.text)) {
+        addRow();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Add row");
+    }
+
+    const bool hasRowSelected =
+        selectedRow >= 0 && selectedRow < static_cast<int>(tableData.size());
+
+    ImGui::SameLine();
+    if (UIWidgets::iconToolButton("duplicate", ICON_FA_CLONE, colors.blue, hasRowSelected)) {
+        duplicateRow(selectedRow);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Duplicate row");
+    }
+
+    ImGui::SameLine();
+    if (UIWidgets::iconToolButton("delete", ICON_FA_TRASH_CAN, colors.red, hasRowSelected)) {
+        deleteRow(selectedRow);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Delete row");
+    }
+
+    if (hasChanges) {
+        ImGui::SameLine(0, Theme::Spacing::M);
+        ImGui::TextColored(colors.peach, ICON_FA_CIRCLE " Unsaved changes");
+    }
+
+    if (isMongoCollection()) {
+        const float toggleWidth = ImGui::CalcTextSize(ICON_FA_TABLE " Table").x +
+                                  ImGui::CalcTextSize(ICON_FA_CODE " JSON").x + 56.0f;
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - toggleWidth +
+                        ImGui::GetStyle().ItemSpacing.x);
+        UIWidgets::beginSegmentedControl("MongoViewToggle");
+        if (UIWidgets::segmentedItem(ICON_FA_TABLE " Table",
+                                     mongoViewMode_ == MongoCollectionViewMode::Table)) {
+            mongoViewMode_ = MongoCollectionViewMode::Table;
+        }
+        ImGui::SameLine();
+        if (UIWidgets::segmentedItem(ICON_FA_CODE " JSON",
+                                     mongoViewMode_ == MongoCollectionViewMode::Json)) {
+            mongoViewMode_ = MongoCollectionViewMode::Json;
+        }
+        UIWidgets::endSegmentedControl();
+    }
+
+    if (!currentFilter.empty()) {
+        ImGui::Dummy(ImVec2(0, Theme::Spacing::XS));
+        if (filterParseError) {
+            ImGui::TextColored(colors.red, ICON_FA_TRIANGLE_EXCLAMATION " Invalid filter: %s",
+                               currentFilter.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(colors.subtext0, "(ignored — showing all %d rows)", totalRows);
+        } else {
+            ImGui::TextColored(colors.green, ICON_FA_FILTER " Active filter: %s",
+                               currentFilter.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(colors.subtext0, "(%d rows)", totalRows);
+        }
+    }
+
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, Theme::Spacing::S));
+}
+
+void TableViewerTab::renderPaginationBar(const Theme::Colors& colors) {
     ImGui::Dummy(ImVec2(0, Theme::Spacing::XS));
 
-    const int totalPages = (totalRows + rowsPerPage - 1) / rowsPerPage;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, colors.surface0);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
+    ImGui::BeginChild("TablePagination", ImVec2(-1, 0), ImGuiChildFlags_AutoResizeY);
 
-    if (ImGui::Button("<<") && currentPage > 0) {
+    const int totalPages = std::max(1, (totalRows + rowsPerPage - 1) / rowsPerPage);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
+    if (ImGui::Button(ICON_FA_ANGLES_LEFT) && currentPage > 0) {
         firstPage();
     }
-    ImGui::SameLine();
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("First page");
+    }
 
-    if (ImGui::Button("<") && currentPage > 0) {
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_ANGLE_LEFT) && currentPage > 0) {
         previousPage();
     }
-    ImGui::SameLine(0, Theme::Spacing::M);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Previous page");
+    }
 
-    ImGui::Text("Page %d of %d (%d rows)", currentPage + 1, totalPages, totalRows);
     ImGui::SameLine(0, Theme::Spacing::M);
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("Page %d of %d", currentPage + 1, totalPages);
+    ImGui::SameLine(0, Theme::Spacing::S);
+    ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+    ImGui::Text("(%d rows)", totalRows);
+    ImGui::PopStyleColor();
 
-    if (ImGui::Button(">") && currentPage < totalPages - 1) {
+    ImGui::SameLine(0, Theme::Spacing::M);
+    if (ImGui::Button(ICON_FA_ANGLE_RIGHT) && currentPage < totalPages - 1) {
         nextPage();
     }
-    ImGui::SameLine();
-
-    if (ImGui::Button(">>") && currentPage < totalPages - 1) {
-        lastPage();
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Next page");
     }
 
-    // Page size selector
     ImGui::SameLine();
-    ImGui::Dummy(ImVec2(20, 0)); // Add some spacing
-    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_ANGLES_RIGHT) && currentPage < totalPages - 1) {
+        lastPage();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Last page");
+    }
+
+    ImGui::SameLine(0, Theme::Spacing::L);
     ImGui::AlignTextToFramePadding();
-    ImGui::Text("Rows per page:");
+    ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+    ImGui::Text("Rows per page");
+    ImGui::PopStyleColor();
     ImGui::SameLine(0, Theme::Spacing::S);
     ImGui::SetNextItemWidth(80.0f);
 
     static const int pageSizeOptions[] = {10, 25, 50, 100, 200, 500};
     static const char* pageSizeLabels[] = {"10", "25", "50", "100", "200", "500"};
     int currentSizeIndex = -1;
-
-    // Find current size in options
     for (int i = 0; i < IM_ARRAYSIZE(pageSizeOptions); i++) {
         if (pageSizeOptions[i] == rowsPerPage) {
             currentSizeIndex = i;
@@ -304,7 +418,6 @@ void TableViewerTab::render() {
         }
     }
 
-    // Store the string to avoid dangling pointer
     std::string customSizeLabel;
     const char* currentSizeLabel;
     if (currentSizeIndex >= 0) {
@@ -319,17 +432,10 @@ void TableViewerTab::render() {
             const bool isSelected = (pageSizeOptions[i] == rowsPerPage);
             if (ImGui::Selectable(pageSizeLabels[i], isSelected)) {
                 if (pageSizeOptions[i] != rowsPerPage) {
-                    // Calculate first row index with old page size
                     const int oldRowsPerPage = rowsPerPage;
                     const int firstRowOnCurrentPage = currentPage * oldRowsPerPage;
-
-                    // Update to new page size
                     rowsPerPage = pageSizeOptions[i];
-
-                    // Calculate new page to stay on approximately the same data
                     currentPage = firstRowOnCurrentPage / rowsPerPage;
-
-                    // Reload data with new page size
                     loadDataAsync();
                 }
             }
@@ -340,17 +446,17 @@ void TableViewerTab::render() {
         ImGui::EndCombo();
     }
 
-    // Show loading indicator
     if (dataLoadOp.isRunning()) {
-        ImGui::SameLine();
-        ImGui::Text("Loading...");
+        ImGui::SameLine(0, Theme::Spacing::M);
+        ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
+        ImGui::TextUnformatted("Loading...");
+        ImGui::PopStyleColor();
     }
 
-    // Check async SQL execution status
-    checkSQLExecutionStatus();
-
-    // Show save confirmation dialog if needed
-    showSaveConfirmationDialog();
+    ImGui::PopStyleVar();
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
 }
 
 void TableViewerTab::nextPage() {
@@ -586,6 +692,14 @@ void TableViewerTab::loadDataAsync() {
             const int offset = currentPage * rowsPerPage;
             tableData =
                 node_->getTableData(table_, rowsPerPage, offset, currentFilter, orderByClause);
+
+            mongoDocumentJson_.clear();
+            if (isMongoCollection()) {
+                if (auto* mongoNode = dynamic_cast<MongoDBDatabaseNode*>(node_)) {
+                    mongoDocumentJson_ = mongoNode->getCollectionDocumentsAsJson(
+                        table_, rowsPerPage, offset, currentFilter, orderByClause);
+                }
+            }
 
             originalData = tableData;
             hasChanges = false;
@@ -934,6 +1048,11 @@ void TableViewerTab::applyFilter() {
         return;
     }
 
+    filterParseError = false;
+    if (node_->getDatabaseType() == DatabaseType::MONGODB && !newFilter.empty()) {
+        filterParseError = !isValidMongoFilter(newFilter);
+    }
+
     currentFilter = newFilter;
     filterChanged = true;
 
@@ -958,8 +1077,16 @@ void TableViewerTab::initializeTableRenderer() {
     config.allowEditing = true;
     config.showRowNumbers = true;
     config.minHeight = 200.0f;
+    config.showColumnTypes = true;
 
+    const bool mongo = isMongoCollection();
     tableRenderer = std::make_unique<TableRenderer>(config);
+    tableRenderer->setFormatColumnType([mongo](const std::string& rawType) {
+        if (mongo) {
+            return mongo_bson::mongoTypeDisplayLabel(rawType);
+        }
+        return sqlColumnTypeLabel(rawType);
+    });
 
     // Set up callbacks
     tableRenderer->setOnCellEdit([this](int row, int col, const std::string& newValue) {
@@ -1228,6 +1355,21 @@ void TableViewerTab::syncValuePanelBuffer() {
 void TableViewerTab::renderValueTab() {
     const auto& colors = Application::getInstance().getCurrentColors();
 
+    if (isMongoCollection() && mongoViewMode_ == MongoCollectionViewMode::Json) {
+        if (selectedRow < 0 || selectedRow >= static_cast<int>(mongoDocumentJson_.size())) {
+            ImGui::TextColored(colors.subtext0, "Select a document to view its JSON.");
+            return;
+        }
+
+        ImGui::TextColored(colors.blue, "Document %d",
+                           currentPage * rowsPerPage + selectedRow + 1);
+        ImGui::Separator();
+
+        JsonTreeView::renderJson(mongoDocumentJson_[static_cast<size_t>(selectedRow)],
+                                 ImGui::GetID("valuePanelTree"));
+        return;
+    }
+
     syncValuePanelBuffer();
 
     if (selectedRow < 0 || selectedCol < 0 || selectedRow >= static_cast<int>(tableData.size()) ||
@@ -1375,7 +1517,9 @@ void TableViewerTab::renderMetadataTab() {
 
             // Type column
             ImGui::TableSetColumnIndex(1);
-            ImGui::TextColored(colors.subtext0, "%s", col.type.c_str());
+            const std::string typeLabel =
+                columnTypeDisplayLabel(col, isMongoCollection());
+            ImGui::TextColored(colors.subtext0, "%s", typeLabel.c_str());
 
             // Nullable column
             ImGui::TableSetColumnIndex(2);
@@ -1394,4 +1538,23 @@ void TableViewerTab::renderMetadataTab() {
 
         ImGui::EndTable();
     }
+}
+
+bool TableViewerTab::isMongoCollection() const {
+    return node_ && node_->getDatabaseType() == DatabaseType::MONGODB;
+}
+
+void TableViewerTab::renderMongoJsonView(float /*width*/, float height) {
+    if (!ImGui::BeginChild("MongoJsonView", ImVec2(0, height), ImGuiChildFlags_None)) {
+        return;
+    }
+
+    JsonTreeView::DocumentListOptions options;
+    options.selectedRow = selectedRow;
+    options.rowNumberOffset = currentPage * rowsPerPage;
+    options.onSelectRow = [this](int row) { selectCell(row, 0); };
+
+    JsonTreeView::renderDocumentList(mongoDocumentJson_, ImGui::GetID("mongoDocs"), &options);
+
+    ImGui::EndChild();
 }

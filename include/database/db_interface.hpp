@@ -293,6 +293,18 @@ public:
         lastConnectionError = error;
     }
 
+    [[nodiscard]] const std::string& getServerVersion() const {
+        return serverVersion_;
+    }
+
+    void setServerVersion(std::string version) {
+        serverVersion_ = std::move(version);
+    }
+
+    void clearServerVersion() {
+        serverVersion_.clear();
+    }
+
     // Connection info getter/setter
     virtual const DatabaseConnectionInfo& getConnectionInfo() const {
         return connectionInfo;
@@ -390,6 +402,7 @@ protected:
     // Persistent connection ID for app state
     int savedConnectionId = -1;
     bool connected = false;
+    std::string serverVersion_;
     DatabaseConnectionInfo connectionInfo;
     SSHTunnel sshTunnel_;
 

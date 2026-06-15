@@ -16,6 +16,8 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -44,6 +46,8 @@ public:
      * For MySQL/PostgreSQL with showAllDatabases=true: shows list of databases
      */
     void renderRootNode();
+
+    void setTableSearchFilter(std::string_view filter);
 
     [[nodiscard]] const std::unordered_set<const Table*>& getSelectedTables() const {
         return selectedTables_;
@@ -95,6 +99,12 @@ private:
     std::string postgresToolTitle_;
     std::string postgresToolRefreshDbName_;
     bool postgresToolRefreshDatabaseList_ = false;
+    std::string tableSearchFilter_;
+
+    [[nodiscard]] bool hasTableSearchFilter() const {
+        return !tableSearchFilter_.empty();
+    }
+    [[nodiscard]] bool matchesTableSearch(std::string_view name) const;
 
     void handleTableClick(const Table* table);
     void renderSchemaFilterBadge(const std::string& dbName, std::vector<std::string> schemaNames,
@@ -146,10 +156,10 @@ private:
     IDatabaseNode* resolveNodeForQuery(const SqlScript& script) const;
 
     // Helper function to render a tree node with icon
-    static bool
-    renderTreeNodeWithIcon(const std::string& label, const std::string& nodeId,
-                           const std::string& icon, ImU32 iconColor,
-                           ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
-                                                      ImGuiTreeNodeFlags_OpenOnDoubleClick |
-                                                      ImGuiTreeNodeFlags_FramePadding);
+    bool renderTreeNodeWithIcon(const std::string& label, const std::string& nodeId,
+                                const std::string& icon, ImU32 iconColor,
+                                ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+                                                           ImGuiTreeNodeFlags_OpenOnDoubleClick |
+                                                           ImGuiTreeNodeFlags_FramePadding,
+                                bool expandWhenSearching = false);
 };

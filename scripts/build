@@ -102,6 +102,16 @@ install -m644 "$ROOT_DIR/packaging/$APP_IDENTIFIER.desktop" \
 install -m644 "$ROOT_DIR/assets/appicon.png" \
     "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP_IDENTIFIER.png"
 
+# Clipboard helpers — paste from external apps (Wayland: wl-paste, X11: xclip).
+for tool in wl-paste xclip; do
+    if src="$(command -v "$tool" 2>/dev/null)"; then
+        install -m755 "$src" "$APPDIR/usr/bin/$tool"
+        echo "Bundled $tool into AppImage"
+    else
+        echo "Warning: $tool not found; install wl-clipboard and xclip before packaging"
+    fi
+done
+
 # GTK plugin bundles libgtk-4, GLib schemas, gdk-pixbuf loaders, immodules, etc.
 # Without it, linuxdeploy only copies direct ldd deps and the AppImage is tiny
 # (~20–30 MB) but missing libraries needed on other distros.

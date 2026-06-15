@@ -34,7 +34,7 @@ public:
     virtual ImTextureID createTextureFromRGBA(const uint8_t* pixels, int width, int height) = 0;
 };
 
-// ---- Linux: OpenGL 3.3 via GTK GtkGLArea ----
+// ---- Linux: OpenGL ES 3.2 via GTK GtkGLArea (EGL; required for NVIDIA + GTK4) ----
 #if defined(__linux__)
 
 #include <gtk/gtk.h>
@@ -66,10 +66,20 @@ private:
 };
 
 void setLinuxClipboardCache(std::string text);
+void setLinuxClipboardWidget(GtkWidget* widget);
+GtkWidget* getLinuxClipboardWidget();
+bool isLinuxClipboardOwnedByApp();
+void clearLinuxClipboardAppOwnership();
+void writeLinuxSystemClipboard(const std::string& text);
+void scheduleLinuxSystemClipboardWrite(std::string text);
+void cancelLinuxClipboardWrite();
 void refreshLinuxClipboardAsync();
+void refreshLinuxClipboardForPaste();
 void cleanupLinuxClipboard();
 
-// ---- macOS: Metal via CAMetalLayer (GLFW window) ----
+// Prepare Gdk GL support after gtk_init_check(); call once per process.
+bool prepareLinuxDisplayGl();
+
 #elif defined(__APPLE__)
 
 #include <GLFW/glfw3.h>

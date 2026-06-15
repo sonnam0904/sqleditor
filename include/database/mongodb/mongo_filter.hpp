@@ -11,7 +11,11 @@
 //       ("project" = 'abc') AND ("created_by" = 'system')
 //       status IS NULL
 //       name LIKE 'john%'
+//       _id = 611f7411e57e548b0b146c66
 bsoncxx::document::value parseMongoFilter(const std::string& filter);
+
+// Returns false when a non-empty filter string cannot be converted to BSON.
+bool isValidMongoFilter(const std::string& filter);
 
 // Parse sort for MongoDB find(). Accepts JSON {"field": 1} or SQL-style:
 //   project ASC, created_at DESC

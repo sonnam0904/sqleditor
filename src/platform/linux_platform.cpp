@@ -1,6 +1,8 @@
 #if defined(__linux__)
 
 #include "platform/linux_platform.hpp"
+#include "platform/linux_graphics_env.hpp"
+#include "platform/graphics_backend.hpp"
 #include "application.hpp"
 #include "config.hpp"
 #include "database/async_helper.hpp"
@@ -9,9 +11,14 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <format>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <vector>
+#include <gtk/gtk.h>
 
 #ifdef GDK_WINDOWING_X11
 #include <X11/Xlib.h>
@@ -28,18 +35,104 @@ namespace {
         }
 
         std::string output;
-        std::array<char, 4096> buffer{};
-        while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
-            output.append(buffer.data());
+        std::array<char, 8192> buffer{};
+        size_t bytesRead = 0;
+        while ((bytesRead = fread(buffer.data(), 1, buffer.size(), pipe)) > 0) {
+            output.append(buffer.data(), bytesRead);
         }
+
         const int status = pclose(pipe);
-        if (status != 0 || output.empty()) {
-            return std::nullopt;
-        }
         while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) {
             output.pop_back();
         }
-        return output;
+
+        if (!output.empty()) {
+            return output;
+        }
+
+        if (status == -1) {
+            return std::nullopt;
+        }
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            return std::nullopt;
+        }
+        return std::nullopt;
+    }
+
+    std::string getApplicationBinaryDirectory() {
+        std::array<char, 4096> path{};
+        const ssize_t len = readlink("/proc/self/exe", path.data(), path.size() - 1);
+        if (len <= 0) {
+            return {};
+        }
+        path[static_cast<size_t>(len)] = '\0';
+        const std::string exe(path.data());
+        const auto pos = exe.find_last_of('/');
+        if (pos == std::string::npos) {
+            return {};
+        }
+        return exe.substr(0, pos);
+    }
+
+    void appendClipboardCommands(std::vector<std::string>& commands, const std::string& tool,
+                                 const char* args) {
+        const std::string binDir = getApplicationBinaryDirectory();
+        if (!binDir.empty()) {
+            commands.push_back(std::format("{}/{} {}", binDir, tool, args));
+        }
+        commands.push_back(std::format("/usr/bin/{} {}", tool, args));
+        commands.push_back(std::format("{} {}", tool, args));
+    }
+
+    std::optional<std::string> readLinuxSystemClipboard() {
+        std::vector<std::string> commands;
+        commands.reserve(12);
+        appendClipboardCommands(commands, "wl-paste", "--no-newline 2>/dev/null");
+        appendClipboardCommands(commands, "wl-paste", "-n 2>/dev/null");
+        appendClipboardCommands(commands, "wl-paste", "2>/dev/null");
+        appendClipboardCommands(commands, "xclip", "-selection clipboard -o 2>/dev/null");
+
+        for (const std::string& command : commands) {
+            if (auto text = readClipboardFromCommand(command.c_str())) {
+                return text;
+            }
+        }
+        return std::nullopt;
+    }
+
+    guint g_clipboardWriteIdleId = 0;
+    std::string g_pendingClipboardWrite;
+
+    bool writeClipboardViaPopen(const std::string& command, const std::string& text) {
+        FILE* pipe = popen(command.c_str(), "w");
+        if (!pipe) {
+            return false;
+        }
+
+        const size_t written =
+            text.empty() ? 0 : fwrite(text.data(), 1, text.size(), pipe);
+        const int status = pclose(pipe);
+        if (status == -1) {
+            return false;
+        }
+        if (!text.empty() && written != text.size()) {
+            return false;
+        }
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            return false;
+        }
+        return true;
+    }
+
+    bool writeClipboardViaGdk(const std::string& text) {
+        if (GtkWidget* widget = getLinuxClipboardWidget()) {
+            GdkClipboard* clipboard = gdk_display_get_clipboard(gtk_widget_get_display(widget));
+            if (clipboard) {
+                gdk_clipboard_set_text(clipboard, text.c_str());
+                return true;
+            }
+        }
+        return false;
     }
 
     GdkModifierType normalizeModifierStateForKeyEvent(GdkModifierType state, guint keyval,
@@ -86,8 +179,20 @@ LinuxPlatform::~LinuxPlatform() {
 }
 
 bool LinuxPlatform::initializeGTK(int*, char***) {
+    configureLinuxGraphicsEnvironment();
+
     if (!gtk_init_check()) {
         std::cerr << "Failed to initialize GTK" << std::endl;
+        return false;
+    }
+
+    if (!prepareLinuxDisplayGl()) {
+        std::cerr << "Failed to prepare GDK OpenGL display" << std::endl;
+        if (isLinuxNvidiaDriverLoaded()) {
+            std::cerr << "On NVIDIA GPUs, install libnvidia-egl-gbm1: "
+                         "sudo apt install libnvidia-egl-gbm1"
+                      << std::endl;
+        }
         return false;
     }
 
@@ -211,6 +316,10 @@ void LinuxPlatform::onRealize(GtkGLArea* area, gpointer userData) {
 
     if (const GError* glError = gtk_gl_area_get_error(area)) {
         std::cerr << "Failed to initialize OpenGL context: " << glError->message << std::endl;
+        if (isLinuxNvidiaDriverLoaded()) {
+            std::cerr << "NVIDIA GPU detected. Try: sudo apt install libnvidia-egl-gbm1"
+                      << std::endl;
+        }
         return;
     }
 
@@ -359,6 +468,10 @@ gboolean LinuxPlatform::onKeyPress(GtkEventControllerKey*, guint keyval, guint,
 
     platform->noteInteraction();
     platform->updateImGuiKeyMods(normalizeModifierStateForKeyEvent(state, keyval, true));
+
+    if ((state & GDK_CONTROL_MASK) && (keyval == GDK_KEY_v || keyval == GDK_KEY_V)) {
+        refreshLinuxClipboardForPaste();
+    }
 
     ImGuiKey key = platform->gtkKeyToImGuiKey(keyval);
     if (key != ImGuiKey_None) {
@@ -781,9 +894,14 @@ gboolean LinuxPlatform::onTickCallback(GtkWidget* widget, GdkFrameClock*, gpoint
     }
 
     const bool windowFocused = gtk_window_is_active(GTK_WINDOW(platform->window_));
+    if (!windowFocused && platform->lastWindowFocused_) {
+        clearLinuxClipboardAppOwnership();
+    }
     if (windowFocused && !platform->lastWindowFocused_) {
         platform->noteInteraction();
-        refreshLinuxClipboardAsync();
+        if (!isLinuxClipboardOwnedByApp()) {
+            refreshLinuxClipboardAsync();
+        }
     }
     platform->lastWindowFocused_ = windowFocused;
 
@@ -850,15 +968,58 @@ void LinuxPlatform::runMainLoop() {
 }
 
 void refreshLinuxClipboardAsync() {
-    // Avoid gdk_clipboard_read_text_async() — it has been crashing in GTK worker threads when
-    // the selection changes while another app owns the clipboard.
-    if (auto text = readClipboardFromCommand("xclip -selection clipboard -o 2>/dev/null")) {
-        setLinuxClipboardCache(std::move(*text));
+    if (isLinuxClipboardOwnedByApp()) {
         return;
     }
-    if (auto text = readClipboardFromCommand("wl-paste -n 2>/dev/null")) {
+    if (auto text = readLinuxSystemClipboard()) {
         setLinuxClipboardCache(std::move(*text));
     }
+}
+
+void refreshLinuxClipboardForPaste() {
+    if (isLinuxClipboardOwnedByApp()) {
+        return;
+    }
+    refreshLinuxClipboardAsync();
+}
+
+void writeLinuxSystemClipboard(const std::string& text) {
+    std::vector<std::string> commands;
+    commands.reserve(9);
+    appendClipboardCommands(commands, "wl-copy", "2>/dev/null");
+    appendClipboardCommands(commands, "xclip", "-selection clipboard 2>/dev/null");
+
+    for (const std::string& command : commands) {
+        if (writeClipboardViaPopen(command, text)) {
+            return;
+        }
+    }
+
+    writeClipboardViaGdk(text);
+}
+
+gboolean onLinuxClipboardWriteIdle(gpointer) {
+    g_clipboardWriteIdleId = 0;
+    writeLinuxSystemClipboard(g_pendingClipboardWrite);
+    g_pendingClipboardWrite.clear();
+    return G_SOURCE_REMOVE;
+}
+
+void scheduleLinuxSystemClipboardWrite(std::string text) {
+    g_pendingClipboardWrite = std::move(text);
+    if (g_clipboardWriteIdleId != 0) {
+        g_source_remove(g_clipboardWriteIdleId);
+        g_clipboardWriteIdleId = 0;
+    }
+    g_clipboardWriteIdleId = g_idle_add(onLinuxClipboardWriteIdle, nullptr);
+}
+
+void cancelLinuxClipboardWrite() {
+    if (g_clipboardWriteIdleId != 0) {
+        g_source_remove(g_clipboardWriteIdleId);
+        g_clipboardWriteIdleId = 0;
+    }
+    g_pendingClipboardWrite.clear();
 }
 
 #endif // defined(__linux__)

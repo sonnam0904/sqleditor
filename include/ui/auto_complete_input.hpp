@@ -33,6 +33,10 @@ public:
     explicit AutoCompleteInput(Config config);
     ~AutoCompleteInput() = default;
 
+    void setWidth(const float width) {
+        config.width = width;
+    }
+
     bool render(const char* label, char* buffer, size_t bufferSize);
 
     void setKeywords(const std::vector<std::string>& keywords);

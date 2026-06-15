@@ -89,6 +89,8 @@ public:
                refreshWorkflow_.isRunning();
     }
 
+    [[nodiscard]] std::string readServerVersion() const;
+
     std::atomic<bool> loadingKeys = false;
     bool keysLoaded = false;
     std::string lastKeysError;

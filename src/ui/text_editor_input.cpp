@@ -605,7 +605,7 @@ namespace sqleditor {
         }
 
         // Paste
-        if (ImGui::IsKeyPressed(ImGuiKey_V) && !readOnly_) {
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Shortcut | ImGuiKey_V) && !readOnly_) {
             const char* clipboard = ImGui::GetClipboardText();
             if (clipboard && *clipboard) {
                 pushUndoSnapshot();

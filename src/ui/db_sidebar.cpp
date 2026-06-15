@@ -95,6 +95,20 @@ void DatabaseSidebarNew::syncHierarchyCache(
 
 void DatabaseSidebarNew::renderStructure() {
     auto& app = Application::getInstance();
+    const auto& colors = app.getCurrentColors();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 4.0f));
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, colors.surface0);
+    ImGui::InputTextWithHint("##sidebar_table_search",
+                             ICON_FA_MAGNIFYING_GLASS " Search tables...",
+                             tableSearchBuffer_, sizeof(tableSearchBuffer_));
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Filter tables, views and collections (connected databases only)");
+    }
+    ImGui::PopStyleVar();
+    ImGui::Spacing();
 
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 5.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 2.0f));
@@ -105,7 +119,11 @@ void DatabaseSidebarNew::renderStructure() {
     if (!databases.empty()) {
         // copy shared_ptrs so a removal during rendering doesn't invalidate the iterator
         const auto snapshot = databases;
+        const bool searchingTables = tableSearchBuffer_[0] != '\0';
         for (const auto& db : snapshot) {
+            if (searchingTables && !db->isConnected()) {
+                continue;
+            }
             renderDatabaseNode(db);
         }
     } else {
@@ -470,6 +488,8 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
         return;
     }
 
+    ImGui::PushID(db.get());
+
     auto const connectionInfo = db->getConnectionInfo();
     auto const type = connectionInfo.type;
     auto& app = Application::getInstance();
@@ -481,6 +501,9 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
     if (const auto selected = app.getSelectedDatabase(); selected && selected == db) {
         dbFlags |= ImGuiTreeNodeFlags_Selected;
     }
+    if (tableSearchBuffer_[0] != '\0' && db->isConnected()) {
+        dbFlags |= ImGuiTreeNodeFlags_DefaultOpen;
+    }
 
     const bool showSpinner = db->isConnecting();
 
@@ -490,8 +513,16 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
         texturesLoaded_ = true;
     }
 
-    const std::string dbLabel =
-        std::format("   {}###db_{:p}", connectionInfo.name, static_cast<const void*>(db.get()));
+    const std::string dbLabel = [&]() {
+        std::string visibleName = connectionInfo.name;
+        if (db->isConnected()) {
+            const auto& version = db->getServerVersion();
+            if (!version.empty()) {
+                visibleName = std::format("{}  v{}", connectionInfo.name, version);
+            }
+        }
+        return std::format("   {}###db_{:p}", visibleName, static_cast<const void*>(db.get()));
+    }();
     const bool dbOpen = ImGui::TreeNodeEx(dbLabel.c_str(), dbFlags);
     const ImVec2 nodeMin = ImGui::GetItemRectMin();
     const ImVec2 nodeMax = ImGui::GetItemRectMax();
@@ -514,9 +545,29 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
         app.setSelectedDatabase(db);
     }
 
-    ImGui::PushID(db.get());
+    if (!db->isConnected()) {
+        constexpr float connectBtnW = 76.0f;
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::GetWindowPos().x - connectBtnW -
+                        Theme::Spacing::S);
+        if (db->isConnecting()) {
+            ImGui::BeginDisabled();
+            ImGui::Button("Connecting...", ImVec2(connectBtnW, 0));
+            ImGui::EndDisabled();
+        } else if (ImGui::Button("Connect", ImVec2(connectBtnW, 0))) {
+            db->startConnectionAsync();
+        }
+    } else {
+        constexpr float disconnectBtnW = 88.0f;
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::GetWindowPos().x - disconnectBtnW -
+                        Theme::Spacing::S);
+        if (ImGui::Button("Disconnect", ImVec2(disconnectBtnW, 0))) {
+            db->disconnect();
+            db->setAttemptedConnection(false);
+            db->setLastConnectionError("");
+        }
+    }
+
     handleDatabaseContextMenu(db);
-    ImGui::PopID();
 
     db->checkConnectionStatusAsync();
 
@@ -654,58 +705,58 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
     }
 
     if (dbOpen) {
-        if (!db->isConnected() && !db->hasAttemptedConnection() && !db->isConnecting()) {
-            spdlog::debug("Starting connection to database: {}", connectionInfo.name);
-            db->startConnectionAsync();
-        }
-
         if (db->isConnecting()) {
             ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
             ImGui::Text("  Connecting...");
             ImGui::SameLine(0, Theme::Spacing::S);
             UIUtils::Spinner("##connecting_spinner", 6.0f, 2, ImGui::GetColorU32(colors.peach));
             ImGui::PopStyleColor();
-        } else if (!db->isConnected() && !db->hasAttemptedConnection()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
-            ImGui::Text("  Click to connect");
-            ImGui::PopStyleColor();
-        } else if (db->hasAttemptedConnection() && !db->isConnected() &&
-                   !db->getLastConnectionError().empty()) {
-            ImGui::PushStyleColor(ImGuiCol_Text, colors.red);
-            ImGui::TextWrapped("  Connection failed: %s", db->getLastConnectionError().c_str());
-            ImGui::PopStyleColor();
+        } else if (!db->isConnected()) {
+            if (db->hasAttemptedConnection() && !db->getLastConnectionError().empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, colors.red);
+                ImGui::TextWrapped("  Connection failed: %s", db->getLastConnectionError().c_str());
+                ImGui::PopStyleColor();
 
-            if (connectionInfo.type == DatabaseType::ORACLE &&
-                OracleDatabase::needsClientInstall()) {
-                oracleClientInstaller_.checkStatus();
+                if (connectionInfo.type == DatabaseType::ORACLE &&
+                    OracleDatabase::needsClientInstall()) {
+                    oracleClientInstaller_.checkStatus();
 
-                if (oracleClientInstaller_.isRunning()) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
-                    ImGui::Text("  %s", oracleClientInstaller_.getStatusMessage().c_str());
-                    ImGui::SameLine(0, Theme::Spacing::S);
-                    UIUtils::Spinner("##oracle_install_spinner", 6.0f, 2,
-                                     ImGui::GetColorU32(colors.peach));
-                    ImGui::PopStyleColor();
-                } else if (oracleClientInstaller_.getStatus() ==
-                           OracleClientInstaller::Status::Done) {
-                    OracleDatabase::reinitContext();
-                    db->startConnectionAsync();
-                } else {
-                    ImGui::Indent(Theme::Spacing::M);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip(
-                            "Downloads Oracle Instant Client Basic Lite (~30MB) to ~/.sqleditor/");
+                    if (oracleClientInstaller_.isRunning()) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
+                        ImGui::Text("  %s", oracleClientInstaller_.getStatusMessage().c_str());
+                        ImGui::SameLine(0, Theme::Spacing::S);
+                        UIUtils::Spinner("##oracle_install_spinner", 6.0f, 2,
+                                         ImGui::GetColorU32(colors.peach));
+                        ImGui::PopStyleColor();
+                    } else if (oracleClientInstaller_.getStatus() ==
+                               OracleClientInstaller::Status::Done) {
+                        OracleDatabase::reinitContext();
+                        db->startConnectionAsync();
+                    } else {
+                        ImGui::Indent(Theme::Spacing::M);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "Downloads Oracle Instant Client Basic Lite (~30MB) to "
+                                "~/.sqleditor/");
+                        }
+                        ImGui::Unindent(Theme::Spacing::M);
                     }
-                    ImGui::Unindent(Theme::Spacing::M);
                 }
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+                ImGui::Text("  Not connected — click Connect above");
+                ImGui::PopStyleColor();
             }
         } else if (db->isConnected()) {
             if (auto* hierarchy = getHierarchy(db)) {
+                hierarchy->setTableSearchFilter(tableSearchBuffer_);
                 hierarchy->renderRootNode();
             }
         }
         ImGui::TreePop();
     }
+
+    ImGui::PopID();
 }
 
 void DatabaseSidebarNew::handleDatabaseContextMenu(const std::shared_ptr<DatabaseInterface>& db) {
@@ -729,6 +780,13 @@ void DatabaseSidebarNew::handleDatabaseContextMenu(const std::shared_ptr<Databas
             }
         }
         auto& app = Application::getInstance();
+
+        if (!db->isConnected() && !db->isConnecting()) {
+            if (ImGui::MenuItem("Connect")) {
+                db->startConnectionAsync();
+            }
+            ImGui::Separator();
+        }
 
         if (db->isConnected()) {
             auto dbType = db->getConnectionInfo().type;
@@ -768,9 +826,11 @@ void DatabaseSidebarNew::handleDatabaseContextMenu(const std::shared_ptr<Databas
                 });
         }
 
-        if (db->isConnected() && db->getConnectionInfo().type != DatabaseType::SQLITE) {
+        if (db->isConnected()) {
             if (ImGui::MenuItem("Disconnect")) {
                 db->disconnect();
+                db->setAttemptedConnection(false);
+                db->setLastConnectionError("");
             }
         }
 

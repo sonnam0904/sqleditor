@@ -31,8 +31,10 @@ public:
     // Database operations
     std::pair<bool, std::string> dropDatabase(const std::string& dbName) override;
 
-    // IQueryExecutor implementation (for JSON/BSON commands)
+    // IQueryExecutor implementation
     QueryResult executeQuery(const std::string& query, int rowLimit = 1000) override;
+    QueryResult executeQueryForDatabase(const std::string& query, int rowLimit,
+                                        const std::string& dbName);
 
     // Database list methods
     void refreshDatabaseNames();
@@ -89,7 +91,8 @@ public:
     // Get a client from the pool
     mongocxx::pool::entry getClient() const;
 
+    [[nodiscard]] std::string readServerVersion() const;
+
 private:
-    // Thread synchronization
     mutable std::mutex poolMutex;
 };
