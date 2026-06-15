@@ -1,3 +1,13 @@
+## [1.1.0](https://github.com/sonnam0904/sqleditor/compare/v1.0.3...v1.1.0) (2026-06-15)
+
+### Features
+
+* enhance MongoDB support and improve connection handling ([f0e64cc](https://github.com/sonnam0904/sqleditor/commit/f0e64cc2ebffae22bfc8ee299630128385b33d7c))
+
+### Bug Fixes
+
+* support SQL-style filters in MongoDB table viewer ([1aeeaa7](https://github.com/sonnam0904/sqleditor/commit/1aeeaa753fcf6b2b04000bdd1eed2409fe4ac11d))
+
 ## [1.0.3](https://github.com/sonnam0904/sqleditor/compare/v1.0.2...v1.0.3) (2026-06-11)
 
 ### Bug Fixes
