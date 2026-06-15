@@ -1,4 +1,5 @@
 #include "database/mssql.hpp"
+#include "database/server_version.hpp"
 #include "mssql/mssql_utils.hpp"
 #include <format>
 #include <mutex>
@@ -119,9 +120,12 @@ std::pair<bool, std::string> MSSQLDatabase::connect() {
 
     try {
         ensureConnectionPoolForDatabase(connectionInfo);
-        spdlog::debug("Successfully connected to MSSQL database: {}", connectionInfo.database);
         connected = true;
         setLastConnectionError("");
+
+        db_version::fetchAndStoreServerVersion(*this);
+        spdlog::debug("Successfully connected to MSSQL database: {} (version {})",
+                      connectionInfo.database, serverVersion_);
 
         if (connectionInfo.showAllDatabases && !databasesLoaded && !databasesLoader.isRunning()) {
             spdlog::debug("Starting async database loading after connection...");
@@ -149,6 +153,7 @@ void MSSQLDatabase::disconnect() {
         if (!lock.owns_lock()) {
             spdlog::warn("MSSQLDatabase::disconnect: skipping pool teardown during shutdown");
             connected = false;
+            clearServerVersion();
             return;
         }
 
@@ -159,6 +164,7 @@ void MSSQLDatabase::disconnect() {
         }
         stopSshTunnel();
         connected = false;
+        clearServerVersion();
         return;
     }
 
@@ -170,6 +176,7 @@ void MSSQLDatabase::disconnect() {
     }
     stopSshTunnel();
     connected = false;
+    clearServerVersion();
 }
 
 void MSSQLDatabase::refreshConnection() {

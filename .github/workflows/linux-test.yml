@@ -38,7 +38,8 @@ jobs:
             libtirpc-dev libltdl-dev python3-venv \
             autoconf automake autoconf-archive \
             freetds-dev libgnutls28-dev libkrb5-dev \
-            openssl
+            openssl \
+            wl-clipboard xclip
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11

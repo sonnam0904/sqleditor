@@ -1,4 +1,5 @@
 #include "database/sqlite.hpp"
+#include "database/server_version.hpp"
 #include "database/sql_builder.hpp"
 #include <algorithm>
 #include <chrono>
@@ -105,6 +106,7 @@ std::pair<bool, std::string> SQLiteDatabase::connect() {
 
     std::cout << "Successfully connected to database: " << connectionInfo.path << std::endl;
     connected = true;
+    db_version::fetchAndStoreServerVersion(*this);
     return {true, ""};
 }
 
@@ -114,6 +116,7 @@ void SQLiteDatabase::disconnect() {
         db_ = nullptr;
     }
     connected = false;
+    clearServerVersion();
 }
 
 const std::string& SQLiteDatabase::getPath() const {

@@ -14,13 +14,16 @@ public:
     using ConnFactory = std::function<ConnHandle()>;
     using ConnCloser = std::function<void(ConnHandle)>;
     using ConnValidator = std::function<bool(ConnHandle)>;
+    using ConnCanceller = std::function<void(ConnHandle)>;
 
     static constexpr size_t DEFAULT_POOL_SIZE = 2;
 
     ConnectionPool(ConnFactory factory, ConnCloser closer, ConnValidator validator = nullptr,
-                   size_t maxSize = DEFAULT_POOL_SIZE, int maxReconnectAttempts = 3)
+                   size_t maxSize = DEFAULT_POOL_SIZE, int maxReconnectAttempts = 3,
+                   ConnCanceller canceller = nullptr)
         : factory_(std::move(factory)), closer_(std::move(closer)),
-          validator_(std::move(validator)), maxSize_(std::max<size_t>(1, maxSize)),
+          validator_(std::move(validator)), canceller_(std::move(canceller)),
+          maxSize_(std::max<size_t>(1, maxSize)),
           maxReconnectAttempts_(std::max(1, maxReconnectAttempts)) {
         // eagerly create one connection so errors surface immediately
         ConnHandle conn = factory_();
@@ -29,20 +32,33 @@ public:
     }
 
     ~ConnectionPool() {
-        {
-            std::unique_lock lock(mutex_);
-            shutdown_ = true;
-            cv_.notify_all();
-            cv_.wait(lock, [this] { return inUse_ == 0; });
+        shutdownNow(std::chrono::seconds(2));
+    }
+
+    void shutdownNow(std::chrono::milliseconds grace = std::chrono::milliseconds(0)) {
+        std::unique_lock lock(mutex_);
+        shutdown_ = true;
+        cv_.notify_all();
+        if (grace.count() > 0) {
+            cv_.wait_for(lock, grace, [this] { return inUse_ == 0; });
         }
 
-        for (auto conn : all_) {
-            if (closer_)
-                closer_(conn);
-        }
-        all_.clear();
-        while (!available_.empty())
+        auto connections = std::move(all_);
+        while (!available_.empty()) {
             available_.pop();
+        }
+        inUse_ = 0;
+        lock.unlock();
+
+        for (auto conn : connections) {
+            if (canceller_) {
+                canceller_(conn);
+            }
+            if (closer_) {
+                closer_(conn);
+            }
+        }
+        cv_.notify_all();
     }
 
     ConnectionPool(const ConnectionPool&) = delete;
@@ -176,6 +192,7 @@ private:
     ConnFactory factory_;
     ConnCloser closer_;
     ConnValidator validator_;
+    ConnCanceller canceller_;
     size_t maxSize_;
     int maxReconnectAttempts_;
     size_t inUse_ = 0;

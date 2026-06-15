@@ -1,4 +1,5 @@
 #include "database/cassandra.hpp"
+#include "database/server_version.hpp"
 #include "database/ssl_config.hpp"
 #include <chrono>
 #include <format>
@@ -259,7 +260,9 @@ std::pair<bool, std::string> CassandraDatabase::connect() {
 
     connected = true;
     setLastConnectionError("");
-    spdlog::debug("Connected to Cassandra {}:{}", connectionInfo.host, connectionInfo.port);
+    db_version::fetchAndStoreServerVersion(*this);
+    spdlog::debug("Connected to Cassandra {}:{} (version {})", connectionInfo.host,
+                  connectionInfo.port, serverVersion_);
 
     if (connectionInfo.showAllDatabases && !databasesLoaded && !databasesLoader.isRunning()) {
         refreshDatabaseNames();
@@ -272,6 +275,7 @@ void CassandraDatabase::disconnect() {
     freeDriverState();
     stopSshTunnel();
     connected = false;
+    clearServerVersion();
 }
 
 void CassandraDatabase::refreshConnection() {

@@ -1,6 +1,7 @@
 #include "database/oracle.hpp"
 #include "database/ddl_utils.hpp"
 #include "database/oracle/oracle_client_installer.hpp"
+#include "database/server_version.hpp"
 #include "oracle/oracle_utils.hpp"
 #include <cstdlib>
 #include <format>
@@ -175,9 +176,12 @@ std::pair<bool, std::string> OracleDatabase::connect() {
 
     try {
         ensureConnectionPoolForSchema(connectionInfo);
-        spdlog::debug("Successfully connected to Oracle: {}", connectionInfo.database);
         connected = true;
         setLastConnectionError("");
+
+        db_version::fetchAndStoreServerVersion(*this);
+        spdlog::debug("Successfully connected to Oracle: {} (version {})", connectionInfo.database,
+                      serverVersion_);
 
         if (connectionInfo.showAllDatabases && !databasesLoaded && !databasesLoader.isRunning()) {
             spdlog::debug("Starting async schema loading after connection...");
@@ -206,6 +210,7 @@ void OracleDatabase::disconnect() {
         if (!lock.owns_lock()) {
             spdlog::warn("OracleDatabase::disconnect: skipping pool teardown during shutdown");
             connected = false;
+            clearServerVersion();
             return;
         }
 
@@ -216,6 +221,7 @@ void OracleDatabase::disconnect() {
         }
         stopSshTunnel();
         connected = false;
+        clearServerVersion();
         return;
     }
 
@@ -227,6 +233,7 @@ void OracleDatabase::disconnect() {
     }
     stopSshTunnel();
     connected = false;
+    clearServerVersion();
 }
 
 void OracleDatabase::refreshConnection() {

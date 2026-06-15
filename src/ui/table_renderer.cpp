@@ -78,6 +78,20 @@ namespace {
             ImGui::CloseCurrentPopup();
         return pressed && enabled;
     }
+
+    void drawTypeBadge(const char* text, const Theme::Colors& colors) {
+        const ImVec2 textSize = ImGui::CalcTextSize(text);
+        constexpr float padX = 6.0f;
+        constexpr float padY = 2.0f;
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        const ImVec2 size(textSize.x + padX * 2.0f, textSize.y + padY * 2.0f);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImU32 bg = ImGui::GetColorU32(
+            ImVec4(colors.teal.x, colors.teal.y, colors.teal.z, 0.16f));
+        dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg, 4.0f);
+        dl->AddText(ImVec2(pos.x + padX, pos.y + padY), ImGui::GetColorU32(colors.teal), text);
+        ImGui::Dummy(size);
+    }
 } // namespace
 
 TableRenderer::TableRenderer() {
@@ -353,6 +367,7 @@ void TableRenderer::render(const char* tableId) {
 #endif
 
     if (ImGui::BeginTable(tableId, colCount, config.tableFlags, ImVec2(0.0f, availableHeight))) {
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(10.0f, 8.0f));
         if (config.showRowNumbers) {
             int maxRowNum = rowNumberOffset + static_cast<int>(data.size());
             std::string maxRowStr = std::to_string(maxRowNum);
@@ -400,7 +415,7 @@ void TableRenderer::render(const char* tableId) {
                     ImGui::TableSetBgColor(
                         ImGuiTableBgTarget_RowBg1,
                         ImGui::GetColorU32(
-                            ImVec4(colors.surface1.x, colors.surface1.y, colors.surface1.z, 0.4f)));
+                            ImVec4(colors.surface1.x, colors.surface1.y, colors.surface1.z, 0.55f)));
                 }
 
                 if (config.showRowNumbers) {
@@ -467,6 +482,7 @@ void TableRenderer::render(const char* tableId) {
         }
 
         ImGui::TableNextRow(ImGuiTableRowFlags_None, ImGui::GetStyle().ScrollbarSize);
+        ImGui::PopStyleVar();
         ImGui::EndTable();
 #if defined(__APPLE__) && SQLEDITOR_ENABLE_TABLE_AURORA
         tableMin = ImGui::GetItemRectMin();
@@ -1293,7 +1309,21 @@ void TableRenderer::renderColumnHeader(int colIdx, const std::string& colName) {
 
     float columnWidth = ImGui::GetColumnWidth();
 
-    ImGui::Text("%s", colName.c_str());
+    ImGui::PushStyleColor(ImGuiCol_Text, colors.text);
+    ImGui::TextUnformatted(colName.c_str());
+    ImGui::PopStyleColor();
+
+    if (config.showColumnTypes && colIdx >= 0 && colIdx < static_cast<int>(columns.size()) &&
+        !columns[colIdx].type.empty()) {
+        std::string typeLabel = columns[colIdx].type;
+        if (formatColumnType) {
+            typeLabel = formatColumnType(columns[colIdx].type);
+        }
+        if (!typeLabel.empty()) {
+            ImGui::Dummy(ImVec2(0, Theme::Spacing::XS));
+            drawTypeBadge(typeLabel.c_str(), colors);
+        }
+    }
 
     if (isSorted) {
         ImGui::SameLine();

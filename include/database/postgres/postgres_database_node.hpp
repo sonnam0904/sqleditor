@@ -48,6 +48,8 @@ public:
     void checkSchemasStatusAsync();
     ConnectionPool<PGconn*>::Session getSession() const;
     void initializeConnectionPool(const DatabaseConnectionInfo& info);
+    void ensureConnectionPool();
+    void cancelPendingAsyncWork();
 
     // query execution with comprehensive result
     QueryResult executeQuery(const std::string& query, int rowLimit = 1000) override;

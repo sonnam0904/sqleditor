@@ -18,6 +18,7 @@ public:
         bool allowSelection = true;
         float minHeight = 50.0f;
         int tableFlags = 0; // ImGuiTableFlags
+        bool showColumnTypes = false;
         std::set<int> nonEditableColumns;
         std::map<int, int> columnInputFlags; // per-column ImGuiInputTextFlags
         std::map<int, std::vector<std::string>> columnDropdownOptions;
@@ -40,6 +41,7 @@ public:
     using OnSetNullCallback = std::function<void(int row, int col)>;
     using OnFilterByValueCallback = std::function<void(int row, int col, const std::string& value)>;
     using OnDeleteRowCallback = std::function<void(int row)>;
+    using FormatColumnTypeFn = std::function<std::string(const std::string& rawType)>;
 
     TableRenderer();
     explicit TableRenderer(const Config& config);
@@ -85,6 +87,9 @@ public:
     }
     void setOnDeleteRow(OnDeleteRowCallback callback) {
         onDeleteRow = callback;
+    }
+    void setFormatColumnType(FormatColumnTypeFn callback) {
+        formatColumnType = std::move(callback);
     }
 
     // Sorting
@@ -182,6 +187,7 @@ private:
     OnSetNullCallback onSetNull;
     OnFilterByValueCallback onFilterByValue;
     OnDeleteRowCallback onDeleteRow;
+    FormatColumnTypeFn formatColumnType;
 
     // Sorting state
     int sortColumn = -1;

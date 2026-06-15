@@ -3,6 +3,7 @@
 #endif
 
 #include "database/redis.hpp"
+#include "database/server_version.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -238,19 +239,14 @@ std::pair<bool, std::string> RedisDatabase::connect() {
             std::cout << "Redis authentication successful" << std::endl;
         }
 
-        auto* reply = (redisReply*)redisCommand(context, "PING");
-        if (!reply || reply->type == REDIS_REPLY_ERROR) {
-            std::string error = reply ? reply->str : "Connection test failed";
-            setLastConnectionError(error);
-            if (reply)
-                freeReplyObject(reply);
-            cleanupConnectionState();
-            return {false, error};
-        }
-        freeReplyObject(reply);
-
         connected = true;
         setLastConnectionError("");
+        db_version::fetchAndStoreServerVersion(*this);
+        if (serverVersion_.empty()) {
+            setLastConnectionError("Connection test failed");
+            cleanupConnectionState();
+            return {false, getLastConnectionError()};
+        }
         std::cout << "Successfully connected to Redis: " << connectionInfo.buildConnectionString()
                   << std::endl;
         return {true, ""};
@@ -278,6 +274,7 @@ void RedisDatabase::disconnect() {
             sslCtx_ = nullptr;
         }
         connected = false;
+        clearServerVersion();
     }
     stopSshTunnel();
 
@@ -1014,4 +1011,54 @@ QueryResult RedisDatabase::executeQueryInDatabase(int dbIndex, const std::string
     QueryResult result = executeQuery(query, rowLimit);
     endDatabaseScopedOperation(previousDbIndex, dbIndex);
     return result;
+}
+
+namespace {
+
+std::string parseRedisInfoVersion(const char* info) {
+    if (!info) {
+        return {};
+    }
+    std::string_view text(info);
+    constexpr std::string_view prefix = "redis_version:";
+    for (size_t lineStart = 0; lineStart < text.size();) {
+        const size_t lineEnd = text.find('\n', lineStart);
+        const std::string_view line = text.substr(
+            lineStart, lineEnd == std::string_view::npos ? std::string_view::npos
+                                                         : lineEnd - lineStart);
+        if (line.starts_with(prefix)) {
+            std::string version(line.substr(prefix.size()));
+            while (!version.empty() && (version.back() == '\r' || version.back() == ' ')) {
+                version.pop_back();
+            }
+            return version;
+        }
+        if (lineEnd == std::string_view::npos) {
+            break;
+        }
+        lineStart = lineEnd + 1;
+    }
+    return {};
+}
+
+} // namespace
+
+std::string RedisDatabase::readServerVersion() const {
+    std::lock_guard<std::mutex> lock(contextMutex_);
+    if (!context) {
+        return {};
+    }
+    redisReply* reply = static_cast<redisReply*>(redisCommand(context, "INFO", "server"));
+    if (!reply || reply->type == REDIS_REPLY_ERROR) {
+        if (reply) {
+            freeReplyObject(reply);
+        }
+        return {};
+    }
+    std::string version;
+    if (reply->type == REDIS_REPLY_STRING) {
+        version = parseRedisInfoVersion(reply->str);
+    }
+    freeReplyObject(reply);
+    return version;
 }

@@ -100,10 +100,10 @@ namespace Theme {
         ImGuiStyle& style = ImGui::GetStyle();
 
         style.WindowPadding = ImVec2(16.0f, 16.0f);
-        style.FramePadding = ImVec2(8.0f, 6.0f);
-        style.CellPadding = ImVec2(8.0f, 6.0f);
-        style.ItemSpacing = ImVec2(8.0f, 8.0f);
-        style.ItemInnerSpacing = ImVec2(6.0f, 6.0f);
+        style.FramePadding = ImVec2(10.0f, 7.0f);
+        style.CellPadding = ImVec2(10.0f, 8.0f);
+        style.ItemSpacing = ImVec2(10.0f, 8.0f);
+        style.ItemInnerSpacing = ImVec2(8.0f, 6.0f);
         style.TouchExtraPadding = ImVec2(0.0f, 0.0f);
         style.IndentSpacing = 20.0f;
         style.ScrollbarSize = 16.0f;
@@ -116,12 +116,12 @@ namespace Theme {
         style.TabBorderSize = 1.0f;
 
         style.WindowRounding = 0.0f;
-        style.ChildRounding = 0.0f;
-        style.FrameRounding = 0.0f;
-        style.PopupRounding = 0.0f;
-        style.ScrollbarRounding = 0.0f;
-        style.GrabRounding = 0.0f;
-        style.TabRounding = 0.0f;
+        style.ChildRounding = 8.0f;
+        style.FrameRounding = 6.0f;
+        style.PopupRounding = 8.0f;
+        style.ScrollbarRounding = 6.0f;
+        style.GrabRounding = 6.0f;
+        style.TabRounding = 6.0f;
 
         style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
         style.WindowMenuButtonPosition = ImGuiDir_Left;
@@ -182,12 +182,13 @@ namespace Theme {
         c[ImGuiCol_PlotLinesHovered] = colors.blue;
         c[ImGuiCol_PlotHistogram] = colors.blue;
         c[ImGuiCol_PlotHistogramHovered] = colors.sky;
-        c[ImGuiCol_TableHeaderBg] = colors.surface0;
-        c[ImGuiCol_TableBorderStrong] = colors.overlay1;
-        c[ImGuiCol_TableBorderLight] = colors.overlay0;
+        c[ImGuiCol_TableHeaderBg] = colors.surface1;
+        c[ImGuiCol_TableBorderStrong] = colors.overlay0;
+        c[ImGuiCol_TableBorderLight] =
+            ImVec4(colors.overlay0.x, colors.overlay0.y, colors.overlay0.z, 0.35f);
         c[ImGuiCol_TableRowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
         c[ImGuiCol_TableRowBgAlt] =
-            ImVec4(colors.surface0.x, colors.surface0.y, colors.surface0.z, 0.5f);
+            ImVec4(colors.surface0.x, colors.surface0.y, colors.surface0.z, 0.65f);
         c[ImGuiCol_TreeLines] = colors.overlay0;
         c[ImGuiCol_TextSelectedBg] = ImVec4(colors.blue.x, colors.blue.y, colors.blue.z, 0.3f);
         c[ImGuiCol_DragDropTarget] = ImVec4(colors.green.x, colors.green.y, colors.green.z, 0.8f);

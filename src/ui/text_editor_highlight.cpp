@@ -330,8 +330,10 @@ namespace sqleditor {
 )scm";
 
     void TextEditor::initTreeSitter() {
-        if (language_ == Language::Redis || language_ == Language::PlainText)
+        if (language_ == Language::Redis || language_ == Language::MongoShell ||
+            language_ == Language::PlainText) {
             return;
+        }
 
         tsParser_ = ts_parser_new();
 
@@ -664,9 +666,159 @@ namespace sqleditor {
         }
     }
 
+    void TextEditor::rehighlightMongoShell() {
+        colors_.assign(content_.size(), palette_.text);
+
+        static const std::unordered_set<std::string> KEYWORDS = {
+            "db",     "true",   "false",  "null",    "new",      "undefined",
+            "typeof", "return", "var",    "let",     "const",    "function",
+            "if",     "else",   "for",    "while",   "switch",   "case",
+            "break",  "continue", "try",  "catch",   "finally",  "throw",
+        };
+
+        static const std::unordered_set<std::string> METHODS = {
+            "find",           "findOne",        "aggregate",      "insertOne",
+            "insertMany",     "updateOne",      "updateMany",     "replaceOne",
+            "deleteOne",      "deleteMany",     "countDocuments", "estimatedDocumentCount",
+            "distinct",       "drop",           "renameCollection", "createIndex",
+            "dropIndex",      "getIndexes",     "createCollection", "runCommand",
+            "getCollectionNames", "getCollection", "getSiblingDB", "adminCommand",
+            "limit",          "skip",           "sort",           "project",
+            "hint",           "explain",        "mapReduce",      "watch",
+            "bulkWrite",      "stats",          "dataSize",       "storageSize",
+            "totalIndexSize", "validate",       "getShardDistribution",
+        };
+
+        static const std::unordered_set<std::string> CONSTRUCTORS = {
+            "ObjectId",    "ISODate",      "Date",         "NumberLong", "NumberInt",
+            "NumberDecimal", "BinData",    "UUID",         "DBRef",      "Timestamp",
+            "MinKey",      "MaxKey",       "Code",         "BSONRegExp", "RegExp",
+            "HexData",     "MD5",          "Decimal128",
+        };
+
+        const size_t n = content_.size();
+        size_t i = 0;
+
+        while (i < n) {
+            if (std::isspace(static_cast<unsigned char>(content_[i]))) {
+                ++i;
+                continue;
+            }
+
+            // line comment
+            if (content_[i] == '/' && i + 1 < n && content_[i + 1] == '/') {
+                while (i < n && content_[i] != '\n') {
+                    colors_[i++] = palette_.comment;
+                }
+                continue;
+            }
+
+            // block comment
+            if (content_[i] == '/' && i + 1 < n && content_[i + 1] == '*') {
+                colors_[i++] = palette_.comment;
+                colors_[i++] = palette_.comment;
+                while (i < n) {
+                    if (content_[i] == '*' && i + 1 < n && content_[i + 1] == '/') {
+                        colors_[i++] = palette_.comment;
+                        colors_[i++] = palette_.comment;
+                        break;
+                    }
+                    colors_[i++] = palette_.comment;
+                }
+                continue;
+            }
+
+            // string or template literal
+            if (content_[i] == '"' || content_[i] == '\'' || content_[i] == '`') {
+                const char quote = content_[i];
+                colors_[i++] = palette_.string;
+                while (i < n && content_[i] != quote && content_[i] != '\n') {
+                    if (content_[i] == '\\' && i + 1 < n) {
+                        colors_[i++] = palette_.string;
+                    }
+                    colors_[i++] = palette_.string;
+                }
+                if (i < n && content_[i] == quote) {
+                    colors_[i++] = palette_.string;
+                }
+                continue;
+            }
+
+            // number
+            if (std::isdigit(static_cast<unsigned char>(content_[i])) ||
+                (content_[i] == '-' && i + 1 < n &&
+                 std::isdigit(static_cast<unsigned char>(content_[i + 1])))) {
+                if (content_[i] == '-') {
+                    colors_[i++] = palette_.number;
+                }
+                if (i < n && content_[i] == '0' && i + 1 < n &&
+                    (content_[i + 1] == 'x' || content_[i + 1] == 'X')) {
+                    colors_[i++] = palette_.number;
+                    colors_[i++] = palette_.number;
+                    while (i < n && std::isxdigit(static_cast<unsigned char>(content_[i]))) {
+                        colors_[i++] = palette_.number;
+                    }
+                    continue;
+                }
+                while (i < n && (std::isdigit(static_cast<unsigned char>(content_[i])) ||
+                                 content_[i] == '.' || content_[i] == 'e' || content_[i] == 'E' ||
+                                 content_[i] == '+' || content_[i] == '-')) {
+                    colors_[i++] = palette_.number;
+                }
+                continue;
+            }
+
+            // punctuation
+            if (content_[i] == '{' || content_[i] == '}' || content_[i] == '[' ||
+                content_[i] == ']' || content_[i] == '(' || content_[i] == ')' ||
+                content_[i] == ':' || content_[i] == ',') {
+                colors_[i++] = palette_.operator_;
+                continue;
+            }
+
+            if (content_[i] == '.') {
+                colors_[i++] = palette_.operator_;
+                continue;
+            }
+
+            // identifier / operator token
+            if (std::isalpha(static_cast<unsigned char>(content_[i])) || content_[i] == '_' ||
+                content_[i] == '$') {
+                const size_t start = i;
+                while (i < n && (std::isalnum(static_cast<unsigned char>(content_[i])) ||
+                                 content_[i] == '_' || content_[i] == '$')) {
+                    ++i;
+                }
+
+                const std::string word(content_.substr(start, i - start));
+                ImU32 color = palette_.text;
+                if (!word.empty() && word[0] == '$') {
+                    color = palette_.keyword;
+                } else if (KEYWORDS.contains(word)) {
+                    color = palette_.keyword;
+                } else if (METHODS.contains(word)) {
+                    color = palette_.function;
+                } else if (CONSTRUCTORS.contains(word)) {
+                    color = palette_.type;
+                }
+
+                for (size_t k = start; k < i; ++k) {
+                    colors_[k] = color;
+                }
+                continue;
+            }
+
+            ++i;
+        }
+    }
+
     void TextEditor::rehighlight() {
         if (language_ == Language::Redis) {
             rehighlightRedis();
+            return;
+        }
+        if (language_ == Language::MongoShell) {
+            rehighlightMongoShell();
             return;
         }
         if (language_ == Language::PlainText) {

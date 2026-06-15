@@ -47,6 +47,9 @@ install_dependencies() {
                 echo "Installing libnvidia-egl-gbm1 (NVIDIA OpenGL runtime)..."
                 sudo apt install -y libnvidia-egl-gbm1
             fi
+            # Clipboard paste from other apps (Wayland + X11).
+            echo "Installing clipboard runtime tools (wl-clipboard, xclip)..."
+            sudo apt install -y wl-clipboard xclip
         elif command -v dnf &> /dev/null; then
             echo "Installing Fedora dependencies..."
             sudo dnf install -y \
@@ -69,7 +72,9 @@ install_dependencies() {
                 freetds-devel \
                 gnutls-devel \
                 krb5-devel \
-                unzip
+                unzip \
+                wl-clipboard \
+                xclip
         else
             echo "Warning: Unknown Linux distro, skipping system dependencies"
         fi

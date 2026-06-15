@@ -12,6 +12,8 @@ class MongoDBDatabaseNode;
 class AIChatState;
 class AIChatPanel;
 
+enum class MongoResultViewMode { Table, Json };
+
 class MongoEditorTab final : public Tab {
 public:
     explicit MongoEditorTab(const std::string& name, MongoDBDatabaseNode* node);
@@ -40,6 +42,7 @@ private:
     float splitterPosition_ = 0.4f;
     float totalContentHeight_ = 0.0f;
     int pendingEditorFocusFrames_ = 3;
+    MongoResultViewMode resultViewMode_ = MongoResultViewMode::Table;
 
     void startQueryExecutionAsync(const std::string& query);
     void checkQueryExecutionStatus();
@@ -47,13 +50,16 @@ private:
 
     void renderHeader() const;
     void renderToolbar();
-    void renderQueryResults() const;
-    void renderSingleResult(const StatementResult& r, size_t index) const;
+    void renderQueryResults();
+    void renderSingleResult(const StatementResult& r, size_t index);
+    void renderResultViewToggle(bool hasJsonDocuments);
+    bool resultHasJsonDocuments(const StatementResult& r) const;
 
-    void formatJSON();
+    void formatQuery();
 
     void updateCompletionKeywords();
     bool completionKeywordsSet_ = false;
+    size_t lastCompletionCollectionCount_ = 0;
 
     // AI panel
     std::unique_ptr<AIChatState> aiChatState_;

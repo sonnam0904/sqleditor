@@ -126,7 +126,8 @@ jobs:
             librsvg2-dev libgirepository-2.0-dev \
             libtirpc-dev libltdl-dev python3-venv \
             autoconf automake autoconf-archive \
-            freetds-dev libgnutls28-dev libkrb5-dev
+            freetds-dev libgnutls28-dev libkrb5-dev \
+            wl-clipboard xclip
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11

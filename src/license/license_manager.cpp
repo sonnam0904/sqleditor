@@ -79,7 +79,7 @@ void LicenseManager::loadStoredLicense() {
     std::lock_guard lock(licenseMutex_);
     currentLicense.valid = true;
     currentLicense.status = "active";
-    spdlog::info("Full license enabled (license check bypassed)");
+    // spdlog::info("Full license enabled (license check bypassed)");
 }
 
 void LicenseManager::validateStoredLicense() {}

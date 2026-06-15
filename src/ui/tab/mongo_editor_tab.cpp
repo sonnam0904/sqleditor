@@ -7,13 +7,18 @@
 #include "themes.hpp"
 #include "ui/ai_chat_panel.hpp"
 #include "ui/ai_settings_dialog.hpp"
+#include "ui/json_tree_view.hpp"
 #include "ui/table_renderer.hpp"
 #include "utils/sentry_utils.hpp"
 #include "utils/spinner.hpp"
 #include "utils/splitter.hpp"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <format>
+#include <optional>
+#include <string_view>
+#include <vector>
 
 namespace {
     constexpr const char* LABEL_RUNNING_QUERY = "Running query...";
@@ -23,16 +28,355 @@ namespace {
     constexpr const char* LABEL_NO_RESULTS =
         "No results to display. Execute a query to see results here.";
     constexpr int MAX_QUERY_ROWS = 1000;
+
+    using CI = sqleditor::TextEditor::CompletionItem;
+    using CK = sqleditor::TextEditor::CompletionKind;
+    using CompletionRequest = sqleditor::TextEditor::CompletionRequest;
+
+    std::string toLowerCopy(std::string_view s) {
+        std::string out(s);
+        std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return out;
+    }
+
+    std::string getLinePrefix(const CompletionRequest& request) {
+        int lineStart = request.cursorIndex;
+        while (lineStart > 0) {
+            const char ch = request.content[static_cast<size_t>(lineStart - 1)];
+            if (ch == '\n' || ch == '\r') {
+                break;
+            }
+            --lineStart;
+        }
+        return std::string(request.content.substr(static_cast<size_t>(lineStart),
+                                                  static_cast<size_t>(request.cursorIndex -
+                                                                        lineStart)));
+    }
+
+    std::string lineWithoutCurrentWord(const std::string& linePrefix, std::string_view currentWord) {
+        if (currentWord.empty() || linePrefix.size() < currentWord.size()) {
+            return linePrefix;
+        }
+        return linePrefix.substr(0, linePrefix.size() - currentWord.size());
+    }
+
+    enum class MongoShellCompletionContext {
+        Start,
+        AfterDb,
+        AfterCollection,
+        AfterMethodChain,
+        InDocument,
+        Generic,
+    };
+
+    MongoShellCompletionContext detectMongoShellContext(const std::string& linePrefix,
+                                                        std::string_view currentWord) {
+        std::string line = lineWithoutCurrentWord(linePrefix, currentWord);
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) {
+            line.pop_back();
+        }
+
+        if (line.empty()) {
+            return MongoShellCompletionContext::Start;
+        }
+
+        int braceDepth = 0;
+        for (char ch : line) {
+            if (ch == '{') {
+                ++braceDepth;
+            } else if (ch == '}') {
+                --braceDepth;
+            }
+        }
+        if (braceDepth > 0) {
+            return MongoShellCompletionContext::InDocument;
+        }
+
+        if (line.rfind("db.", 0) != 0) {
+            return MongoShellCompletionContext::Generic;
+        }
+
+        const std::string rest = line.substr(3);
+        if (rest.empty()) {
+            return MongoShellCompletionContext::AfterDb;
+        }
+
+        const size_t firstDot = rest.find('.');
+        if (firstDot == std::string::npos) {
+            return MongoShellCompletionContext::AfterDb;
+        }
+
+        const std::string afterCollection = rest.substr(firstDot + 1);
+        if (afterCollection.empty()) {
+            return MongoShellCompletionContext::AfterCollection;
+        }
+
+        if (line.find('(') != std::string::npos) {
+            const size_t lastDot = line.rfind('.');
+            if (lastDot != std::string::npos && lastDot + 1 < line.size()) {
+                const std::string tail = line.substr(lastDot + 1);
+                if (tail.find('(') == std::string::npos) {
+                    return MongoShellCompletionContext::AfterMethodChain;
+                }
+            }
+        }
+
+        if (afterCollection.find('(') == std::string::npos) {
+            return MongoShellCompletionContext::AfterCollection;
+        }
+
+        return MongoShellCompletionContext::AfterMethodChain;
+    }
+
+    std::optional<std::string> extractCollectionName(std::string_view line) {
+        constexpr std::string_view prefix = "db.";
+        const size_t pos = line.find(prefix);
+        if (pos == std::string_view::npos) {
+            return std::nullopt;
+        }
+
+        size_t i = pos + prefix.size();
+        std::string name;
+        while (i < line.size()) {
+            const char c = line[i];
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$') {
+                name.push_back(c);
+                ++i;
+            } else {
+                break;
+            }
+        }
+        if (name.empty()) {
+            return std::nullopt;
+        }
+        return name;
+    }
+
+    CI makeSnippet(std::string label, std::string insert, std::string detail, CK kind) {
+        CI item;
+        item.text = std::move(label);
+        item.insertText = std::move(insert);
+        item.matchText = item.text;
+        item.detailText = std::move(detail);
+        item.kind = kind;
+        return item;
+    }
+
+    void appendIfMatches(std::vector<CI>& out, CI item, std::string_view currentWord) {
+        const std::string lowerWord = toLowerCopy(currentWord);
+        const std::string lowerMatch = toLowerCopy(item.matchText);
+        if (!lowerWord.empty() && lowerMatch.find(lowerWord) != 0) {
+            return;
+        }
+        out.push_back(std::move(item));
+    }
+
+    std::vector<CI> buildContextualCompletions(MongoShellCompletionContext ctx,
+                                               const std::vector<Table>& collections,
+                                               std::string_view currentWord,
+                                               const std::string& linePrefix) {
+        std::vector<CI> items;
+
+        switch (ctx) {
+        case MongoShellCompletionContext::Start:
+            appendIfMatches(items, makeSnippet("db", "db.", "database handle", CK::Keyword),
+                            currentWord);
+            break;
+
+        case MongoShellCompletionContext::AfterDb:
+            for (const auto& coll : collections) {
+                appendIfMatches(items,
+                                makeSnippet(coll.name, coll.name + ".", "collection", CK::Table),
+                                currentWord);
+            }
+            appendIfMatches(items,
+                            makeSnippet("createCollection", R"(createCollection(""))",
+                                        "create collection", CK::Function),
+                            currentWord);
+            appendIfMatches(items,
+                            makeSnippet("runCommand", "runCommand({ ping: 1 })", "admin command",
+                                        CK::Function),
+                            currentWord);
+            appendIfMatches(items,
+                            makeSnippet("getCollectionNames", "getCollectionNames()", "list collections",
+                                        CK::Function),
+                            currentWord);
+            break;
+
+        case MongoShellCompletionContext::AfterCollection:
+            appendIfMatches(items, makeSnippet("find", "find({})", "query documents", CK::Function),
+                            currentWord);
+            appendIfMatches(items, makeSnippet("findOne", "findOne({})", "query one document",
+                                            CK::Function),
+                            currentWord);
+            appendIfMatches(items,
+                            makeSnippet("aggregate", "aggregate([{ $match: {} }])", "aggregation pipeline",
+                                        CK::Function),
+                            currentWord);
+            appendIfMatches(items, makeSnippet("insertOne", "insertOne({})", "insert document",
+                                            CK::Function),
+                            currentWord);
+            appendIfMatches(items, makeSnippet("insertMany", "insertMany([{}])", "insert documents",
+                                            CK::Function),
+                            currentWord);
+            appendIfMatches(items,
+                            makeSnippet("updateOne", "updateOne({}, { $set: {} })", "update one",
+                                        CK::Function),
+                            currentWord);
+            appendIfMatches(items,
+                            makeSnippet("updateMany", "updateMany({}, { $set: {} })", "update many",
+                                        CK::Function),
+                            currentWord);
+            appendIfMatches(items, makeSnippet("deleteOne", "deleteOne({})", "delete one",
+                                            CK::Function),
+                            currentWord);
+            appendIfMatches(items, makeSnippet("deleteMany", "deleteMany({})", "delete many",
+                                            CK::Function),
+                            currentWord);
+            appendIfMatches(items,
+                            makeSnippet("countDocuments", "countDocuments({})", "count documents",
+                                        CK::Function),
+                            currentWord);
+            appendIfMatches(items, makeSnippet("distinct", R"(distinct("field"))", "distinct values",
+                                            CK::Function),
+                            currentWord);
+            appendIfMatches(items, makeSnippet("drop", "drop()", "drop collection", CK::Function),
+                            currentWord);
+            break;
+
+        case MongoShellCompletionContext::AfterMethodChain:
+            appendIfMatches(items, makeSnippet("limit", "limit(100)", "limit results", CK::Function),
+                            currentWord);
+            appendIfMatches(items, makeSnippet("skip", "skip(0)", "skip results", CK::Function),
+                            currentWord);
+            appendIfMatches(items,
+                            makeSnippet("sort", "sort({ _id: 1 })", "sort results", CK::Function),
+                            currentWord);
+            break;
+
+        case MongoShellCompletionContext::InDocument: {
+            static const std::vector<std::pair<const char*, const char*>> operators = {
+                {"$match", "{ $match: {} }"},
+                {"$group", R"({ $group: { _id: "$field", count: { $sum: 1 } } })"},
+                {"$sort", R"({ $sort: { _id: 1 } })"},
+                {"$project", R"({ $project: { field: 1 } })"},
+                {"$limit", "{ $limit: 100 }"},
+                {"$skip", "{ $skip: 0 }"},
+                {"$lookup", R"({ $lookup: { from: "", localField: "", foreignField: "_id", as: "" } })"},
+                {"$unwind", R"({ $unwind: "$field" })"},
+                {"$set", R"({ $set: { field: "value" } })"},
+                {"$gt", R"({ $gt: 0 })"},
+                {"$gte", R"({ $gte: 0 })"},
+                {"$lt", R"({ $lt: 0 })"},
+                {"$lte", R"({ $lte: 0 })"},
+                {"$in", R"({ $in: [] })"},
+                {"$ne", R"({ $ne: null })"},
+                {"$exists", R"({ $exists: true })"},
+                {"$regex", R"({ $regex: "pattern" })"},
+            };
+            for (const auto& [label, snippet] : operators) {
+                appendIfMatches(items, makeSnippet(label, snippet, "operator", CK::Function),
+                                currentWord);
+            }
+            appendIfMatches(items, makeSnippet("ObjectId", R"(ObjectId(""))", "ObjectId value",
+                                               CK::Function),
+                            currentWord);
+            appendIfMatches(items, makeSnippet("ISODate", R"(ISODate(""))", "date value", CK::Function),
+                            currentWord);
+
+            if (const auto collName = extractCollectionName(linePrefix)) {
+                for (const auto& coll : collections) {
+                    if (coll.name != *collName) {
+                        continue;
+                    }
+                    for (const auto& col : coll.columns) {
+                        appendIfMatches(items,
+                                        makeSnippet(col.name, col.name + ": ", "field", CK::Column),
+                                        currentWord);
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+
+        case MongoShellCompletionContext::Generic:
+            break;
+        }
+
+        return items;
+    }
+
+    std::vector<CI> filterMongoShellCompletions(const CompletionRequest& request,
+                                                const std::vector<CI>& fallbackItems,
+                                                const std::vector<Table>& collections) {
+        if (request.forced) {
+            std::vector<CI> all;
+            all.reserve(64);
+            const std::string linePrefix = getLinePrefix(request);
+            const auto ctx = detectMongoShellContext(linePrefix, request.currentWord);
+            for (const auto ctxType :
+                 {MongoShellCompletionContext::Start, MongoShellCompletionContext::AfterDb,
+                  MongoShellCompletionContext::AfterCollection,
+                  MongoShellCompletionContext::AfterMethodChain,
+                  MongoShellCompletionContext::InDocument}) {
+                auto part = buildContextualCompletions(ctxType, collections, "", linePrefix);
+                all.insert(all.end(), std::make_move_iterator(part.begin()),
+                           std::make_move_iterator(part.end()));
+            }
+            std::ranges::sort(all, [](const CI& a, const CI& b) { return a.text < b.text; });
+            auto ret = std::ranges::unique(all, [](const CI& a, const CI& b) {
+                return a.text == b.text;
+            });
+            all.erase(ret.begin(), ret.end());
+            return all;
+        }
+
+        const std::string linePrefix = getLinePrefix(request);
+        const auto ctx = detectMongoShellContext(linePrefix, request.currentWord);
+        auto items = buildContextualCompletions(ctx, collections, request.currentWord, linePrefix);
+
+        if (items.empty() && ctx == MongoShellCompletionContext::Generic) {
+            const std::string lowerWord = toLowerCopy(request.currentWord);
+            for (const auto& item : fallbackItems) {
+                const std::string lowerMatch =
+                    toLowerCopy(item.matchText.empty() ? item.text : item.matchText);
+                if (lowerWord.empty() || lowerMatch.find(lowerWord) == 0) {
+                    items.push_back(item);
+                }
+            }
+        }
+
+        std::ranges::sort(items, [](const CI& a, const CI& b) { return a.text < b.text; });
+        return items;
+    }
 } // namespace
 
 MongoEditorTab::MongoEditorTab(const std::string& name, MongoDBDatabaseNode* node)
     : Tab(name, TabType::MONGO_EDITOR), node_(node) {
     editor_.SetShowLineNumbers(true);
-    editor_.SetLanguage(sqleditor::TextEditor::Language::JSON);
-    editor_.SetPlaceholder("{ \"collection\": \"users\", \"command\": \"find\", \"filter\": {} }\n"
-                           "\n"
-                           "Commands: find, aggregate, insert, update, delete,\n"
-                           "          createCollection, dropCollection, runCommand");
+    editor_.SetLanguage(sqleditor::TextEditor::Language::MongoShell);
+
+    std::string exampleCollection = "collection";
+    if (node_ && !node_->getTables().empty()) {
+        exampleCollection = node_->getTables().front().name;
+    }
+
+    const std::string placeholder = std::format(
+        "db.{}.find({{}})\n"
+        "\n"
+        "// MongoDB shell (mongosh) syntax:\n"
+        "// db.collection.find({{ field: \"value\" }}).limit(100)\n"
+        "// db.collection.aggregate([{{ $match: {{}} }}])\n"
+        "// db.collection.insertOne({{ name: \"test\" }})\n"
+        "// db.collection.updateMany({{ a: 1 }}, {{ $set: {{ b: 2 }} }})\n"
+        "// db.collection.deleteMany({{ a: 1 }})\n"
+        "// db.createCollection(\"new_collection\")\n"
+        "// db.runCommand({{ ping: 1 }})",
+        exampleCollection);
+    editor_.SetPlaceholder(placeholder);
     editor_.SetSubmitCallback([this] {
         query_ = editor_.GetText();
         startQueryExecutionAsync(query_);
@@ -48,7 +392,8 @@ void MongoEditorTab::render() {
     editor_.SetPalette(
         sqleditor::TextEditor::FromTheme(dark ? Theme::NATIVE_DARK : Theme::NATIVE_LIGHT));
 
-    if (!completionKeywordsSet_) {
+    if (!completionKeywordsSet_ ||
+        (node_ && node_->getTables().size() != lastCompletionCollectionCount_)) {
         updateCompletionKeywords();
     }
 
@@ -178,12 +523,55 @@ void MongoEditorTab::renderToolbar() {
         }
         ImGui::SameLine(0, Theme::Spacing::M);
         if (ImGui::Button(ICON_FA_ALIGN_LEFT " Format")) {
-            formatJSON();
+            formatQuery();
         }
     }
 }
 
-void MongoEditorTab::renderQueryResults() const {
+bool MongoEditorTab::resultHasJsonDocuments(const StatementResult& r) const {
+    return !r.mongoDocumentJson.empty() &&
+           r.mongoDocumentJson.size() == r.tableData.size();
+}
+
+void MongoEditorTab::renderResultViewToggle(const bool hasJsonDocuments) {
+    if (!hasJsonDocuments) {
+        return;
+    }
+
+    const auto& colors = Application::getInstance().getCurrentColors();
+    ImGui::SameLine(0, Theme::Spacing::L);
+
+    const bool tableView = resultViewMode_ == MongoResultViewMode::Table;
+    if (tableView) {
+        ImGui::PushStyleColor(ImGuiCol_Button, colors.surface1);
+    }
+    if (ImGui::Button(ICON_FA_TABLE " Table")) {
+        resultViewMode_ = MongoResultViewMode::Table;
+    }
+    if (tableView) {
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Table view");
+    }
+
+    ImGui::SameLine();
+    const bool jsonView = resultViewMode_ == MongoResultViewMode::Json;
+    if (jsonView) {
+        ImGui::PushStyleColor(ImGuiCol_Button, colors.surface1);
+    }
+    if (ImGui::Button(ICON_FA_CODE " JSON")) {
+        resultViewMode_ = MongoResultViewMode::Json;
+    }
+    if (jsonView) {
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("JSON document view");
+    }
+}
+
+void MongoEditorTab::renderQueryResults() {
     if (queryResult_.empty()) {
         ImGui::Text("%s", LABEL_NO_RESULTS);
         return;
@@ -219,7 +607,7 @@ void MongoEditorTab::renderQueryResults() const {
     }
 }
 
-void MongoEditorTab::renderSingleResult(const StatementResult& r, size_t index) const {
+void MongoEditorTab::renderSingleResult(const StatementResult& r, size_t index) {
     if (!r.success) {
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", r.errorMessage.c_str());
         return;
@@ -230,6 +618,10 @@ void MongoEditorTab::renderSingleResult(const StatementResult& r, size_t index) 
         return;
     }
 
+    const bool hasJsonDocuments = resultHasJsonDocuments(r);
+    const bool showJsonView =
+        hasJsonDocuments && resultViewMode_ == MongoResultViewMode::Json;
+
     if (r.tableData.empty()) {
         ImGui::Text("%s", LABEL_NO_ROWS);
     } else {
@@ -238,23 +630,37 @@ void MongoEditorTab::renderSingleResult(const StatementResult& r, size_t index) 
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", LABEL_ROW_LIMIT);
         }
+        renderResultViewToggle(hasJsonDocuments);
     }
 
-    if (!r.tableData.empty()) {
-        float tableHeight = std::max(ImGui::GetContentRegionAvail().y - 20.0f, 50.0f);
-
-        TableRenderer::Config config;
-        config.allowEditing = false;
-        config.showRowNumbers = false;
-        config.minHeight = tableHeight;
-
-        TableRenderer tableRenderer(config);
-        tableRenderer.setColumns(r.columnNames);
-        tableRenderer.setData(r.tableData);
-
-        std::string tableId = "MongoQueryResults_" + std::to_string(index);
-        tableRenderer.render(tableId.c_str());
+    if (r.tableData.empty()) {
+        return;
     }
+
+    if (showJsonView) {
+        const float listHeight = std::max(ImGui::GetContentRegionAvail().y - 8.0f, 50.0f);
+        if (ImGui::BeginChild(std::format("MongoJsonResults_{}", index).c_str(),
+                              ImVec2(-1, listHeight), ImGuiChildFlags_None)) {
+            JsonTreeView::renderDocumentList(r.mongoDocumentJson,
+                                             ImGui::GetID("queryDocList"));
+        }
+        ImGui::EndChild();
+        return;
+    }
+
+    float tableHeight = std::max(ImGui::GetContentRegionAvail().y - 20.0f, 50.0f);
+
+    TableRenderer::Config config;
+    config.allowEditing = false;
+    config.showRowNumbers = true;
+    config.minHeight = tableHeight;
+
+    TableRenderer tableRenderer(config);
+    tableRenderer.setColumns(r.columnNames);
+    tableRenderer.setData(r.tableData);
+
+    std::string tableId = "MongoQueryResults_" + std::to_string(index);
+    tableRenderer.render(tableId.c_str());
 }
 
 void MongoEditorTab::startQueryExecutionAsync(const std::string& query) {
@@ -313,151 +719,45 @@ void MongoEditorTab::cancelQueryExecution() {
 }
 
 void MongoEditorTab::updateCompletionKeywords() {
-    using CI = sqleditor::TextEditor::CompletionItem;
-    using CK = sqleditor::TextEditor::CompletionKind;
+    lastCompletionCollectionCount_ = node_ ? node_->getTables().size() : 0;
 
-    // MongoDB shell keywords and aggregation operators
     static const std::vector<std::string> mongoKeywords = {
-        // common methods
-        "find",
-        "findOne",
-        "insertOne",
-        "insertMany",
-        "updateOne",
-        "updateMany",
-        "deleteOne",
-        "deleteMany",
-        "aggregate",
-        "count",
-        "countDocuments",
-        "estimatedDocumentCount",
-        "distinct",
-        "createIndex",
-        "dropIndex",
-        "getIndexes",
-        "drop",
-        "rename",
-        "replaceOne",
-        "bulkWrite",
-        // aggregation stages
-        "$match",
-        "$group",
-        "$sort",
-        "$project",
-        "$limit",
-        "$skip",
-        "$unwind",
-        "$lookup",
-        "$addFields",
-        "$set",
-        "$unset",
-        "$replaceRoot",
-        "$replaceWith",
-        "$merge",
-        "$out",
-        "$count",
-        "$facet",
-        "$bucket",
-        "$bucketAuto",
-        "$sample",
-        "$sortByCount",
-        "$graphLookup",
-        "$redact",
-        "$geoNear",
-        // query operators
-        "$eq",
-        "$ne",
-        "$gt",
-        "$gte",
-        "$lt",
-        "$lte",
-        "$in",
-        "$nin",
-        "$and",
-        "$or",
-        "$not",
-        "$nor",
-        "$exists",
-        "$type",
-        "$regex",
-        "$text",
-        "$where",
-        "$all",
-        "$elemMatch",
-        "$size",
-        // update operators
-        "$set",
-        "$unset",
-        "$inc",
-        "$mul",
-        "$rename",
-        "$min",
-        "$max",
-        "$push",
-        "$pull",
-        "$addToSet",
-        "$pop",
-        "$each",
-        "$slice",
-        "$position",
-        // accumulator operators
-        "$sum",
-        "$avg",
-        "$first",
-        "$last",
-        "$min",
-        "$max",
-        "$stdDevPop",
-        "$stdDevSamp",
-        // js keywords
-        "var",
-        "let",
-        "const",
-        "function",
-        "return",
-        "if",
-        "else",
-        "for",
-        "while",
-        "true",
-        "false",
-        "null",
-        "undefined",
-        "new",
-        "this",
-        "db",
-        "ObjectId",
-        "ISODate",
-        "NumberLong",
-        "NumberInt",
-        "NumberDecimal",
+        "ObjectId", "ISODate", "NumberLong", "NumberInt", "true", "false", "null",
     };
 
     std::vector<CI> items;
-    for (const auto& kw : mongoKeywords)
+    items.reserve(mongoKeywords.size());
+    for (const auto& kw : mongoKeywords) {
         items.push_back({kw, CK::Keyword});
-
-    // add collection names as table completions
-    if (node_) {
-        for (const auto& coll : node_->getTables())
-            items.push_back({coll.name, CK::Table});
     }
 
-    // sort and deduplicate
-    std::ranges::sort(items, [](const CI& a, const CI& b) { return a.text < b.text; });
-    auto ret =
-        std::ranges::unique(items, [](const CI& a, const CI& b) { return a.text == b.text; });
-    items.erase(ret.begin(), ret.end());
-
     editor_.SetCompletionItems(std::move(items));
+    editor_.SetCompletionFilter([this](const CompletionRequest& request,
+                                       const std::vector<CI>& fallbackItems) {
+        static const std::vector<Table> emptyCollections;
+        const std::vector<Table>& collections =
+            node_ ? node_->getTables() : emptyCollections;
+        return filterMongoShellCompletions(request, fallbackItems, collections);
+    });
     completionKeywordsSet_ = true;
 }
 
-void MongoEditorTab::formatJSON() {
-    std::string formatted = sqleditor::TextEditor::FormatJSON(editor_.GetText());
-    if (!formatted.empty()) {
-        editor_.SetText(formatted);
-        query_ = formatted;
+void MongoEditorTab::formatQuery() {
+    const std::string text = editor_.GetText();
+    if (text.empty()) {
+        return;
+    }
+    const std::string trimmed = [&] {
+        std::string s = text;
+        s.erase(0, s.find_first_not_of(" \t\n\r"));
+        return s;
+    }();
+    if (!trimmed.empty() && trimmed.front() == '{') {
+        std::string formatted = sqleditor::TextEditor::FormatJSON(text);
+        if (!formatted.empty()) {
+            editor_.SetText(formatted);
+            query_ = formatted;
+        }
     }
 }
 

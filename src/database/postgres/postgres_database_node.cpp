@@ -41,7 +41,38 @@ namespace {
         if (!info.password.empty()) {
             connStr += " password=" + info.password;
         }
+        connStr += " options='-c statement_timeout=120000'";
         return connStr;
+    }
+
+    void cancelPostgresConnection(PGconn* conn) {
+        if (!conn) {
+            return;
+        }
+        PGcancel* cancel = PQgetCancel(conn);
+        if (!cancel) {
+            return;
+        }
+        char errbuf[256]{};
+        PQcancel(cancel, errbuf, sizeof(errbuf));
+        PQfreeCancel(cancel);
+    }
+
+    auto makePostgresConnectionPool(const std::string& connStr) {
+        return std::make_unique<ConnectionPool<PGconn*>>(
+            [connStr]() -> PGconn* {
+                PGconn* conn = PQconnectdb(connStr.c_str());
+                if (PQstatus(conn) != CONNECTION_OK) {
+                    std::string err = PQerrorMessage(conn);
+                    PQfinish(conn);
+                    throw std::runtime_error("PostgreSQL connection failed: " + err);
+                }
+                return conn;
+            },
+            [](PGconn* conn) { PQfinish(conn); },
+            [](PGconn* conn) { return PQstatus(conn) == CONNECTION_OK; },
+            ConnectionPool<PGconn*>::DEFAULT_POOL_SIZE, 3,
+            [](PGconn* conn) { cancelPostgresConnection(conn); });
     }
 
     StatementResult extractPgResult(PGresult* res, int rowLimit) {
@@ -234,10 +265,21 @@ void PostgresDatabaseNode::startSchemasLoadAsync(bool forceRefresh, bool refresh
 }
 
 ConnectionPool<PGconn*>::Session PostgresDatabaseNode::getSession() const {
+    const_cast<PostgresDatabaseNode*>(this)->ensureConnectionPool();
     if (!connectionPool) {
         throw std::runtime_error("Connection pool not available for database: " + name);
     }
     return connectionPool->acquire();
+}
+
+void PostgresDatabaseNode::ensureConnectionPool() {
+    if (connectionPool || !parentDb || !parentDb->isConnected()) {
+        return;
+    }
+
+    auto nodeInfo = parentDb->getConnectionInfo();
+    nodeInfo.database = name;
+    initializeConnectionPool(nodeInfo);
 }
 
 void PostgresDatabaseNode::initializeConnectionPool(const DatabaseConnectionInfo& info) {
@@ -252,21 +294,7 @@ void PostgresDatabaseNode::initializeConnectionPool(const DatabaseConnectionInfo
 
     std::string connStr = buildPqConnStr(info);
 
-    connectionPool = std::make_unique<ConnectionPool<PGconn*>>(
-        // factory
-        [connStr]() -> PGconn* {
-            PGconn* conn = PQconnectdb(connStr.c_str());
-            if (PQstatus(conn) != CONNECTION_OK) {
-                std::string err = PQerrorMessage(conn);
-                PQfinish(conn);
-                throw std::runtime_error("PostgreSQL connection failed: " + err);
-            }
-            return conn;
-        },
-        // closer
-        [](PGconn* conn) { PQfinish(conn); },
-        // validator
-        [](PGconn* conn) { return PQstatus(conn) == CONNECTION_OK; });
+    connectionPool = makePostgresConnectionPool(connStr);
 }
 
 QueryResult PostgresDatabaseNode::executeQuery(const std::string& query, int rowLimit) {
@@ -595,6 +623,15 @@ int PostgresDatabaseNode::getRowCount(const Table& table, const std::string& whe
         std::cerr << "Error getting row count: " << e.what() << std::endl;
     }
     return 0;
+}
+
+void PostgresDatabaseNode::cancelPendingAsyncWork() {
+    schemasLoader.cancel();
+    for (auto& schema : schemas) {
+        if (schema) {
+            schema->cancelPendingAsyncWork();
+        }
+    }
 }
 
 void PostgresDatabaseNode::triggerChildSchemaRefresh() {

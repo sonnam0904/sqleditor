@@ -104,7 +104,7 @@ namespace sqleditor {
         }
 
         // Language / highlighting mode
-        enum class Language : uint8_t { SQL, Redis, JSON, PlainText };
+        enum class Language : uint8_t { SQL, Redis, JSON, MongoShell, PlainText };
         void SetLanguage(Language lang);
 
         // Options
@@ -259,6 +259,7 @@ namespace sqleditor {
         void cleanupTreeSitter();
         void rehighlight();
         void rehighlightRedis();
+        void rehighlightMongoShell();
 
         // --- Helpers ---
         float getCharWidth(const char* start, const char* end) const;

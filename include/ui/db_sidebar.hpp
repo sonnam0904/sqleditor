@@ -32,6 +32,7 @@ private:
 
     bool historyPanelOpen = false;
     bool texturesLoaded_ = false;
+    char tableSearchBuffer_[128] = {};
 
     OracleClientInstaller oracleClientInstaller_;
 

@@ -24,6 +24,9 @@ add_executable(
     src/database/mysql/mysql_internal.cpp
     src/database/redis.cpp
     src/database/mongodb.cpp
+    src/database/mongodb/mongo_filter.cpp
+    src/database/mongodb/mongo_bson_format.cpp
+    src/database/mongodb/mongo_shell.cpp
     src/database/mongodb/mongodb_database_node.cpp
     src/database/mssql.cpp
     src/database/mssql/mssql_database_node.cpp
@@ -34,6 +37,7 @@ add_executable(
     src/database/cassandra.cpp
     src/database/cassandra/cassandra_database_node.cpp
     src/database/db_utils.cpp
+    src/database/server_version.cpp
     src/database/sql_builder.cpp
     src/database/ssh_config_parser.cpp
 )

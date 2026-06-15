@@ -129,6 +129,8 @@ struct StatementResult {
     // SELECT
     std::vector<std::string> columnNames;
     std::vector<std::vector<std::string>> tableData;
+    // MongoDB find/aggregate: one extended JSON string per table row
+    std::vector<std::string> mongoDocumentJson;
 
     // INSERT/UPDATE/DELETE
     int affectedRows = 0;

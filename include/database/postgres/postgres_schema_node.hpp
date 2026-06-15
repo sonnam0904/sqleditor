@@ -138,6 +138,8 @@ public:
 
     Table refreshTableAsync(const std::string& tableName);
 
+    void cancelPendingAsyncWork();
+
     // ========== Schema Modification ==========
 
     std::pair<bool, std::string> renameSchema(const std::string& newName);

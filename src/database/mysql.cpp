@@ -1,6 +1,7 @@
 #include "database/mysql.hpp"
 #include "database/ddl_utils.hpp"
 #include "database/mysql/mysql_internal.hpp"
+#include "database/server_version.hpp"
 #include "database/sql_builder.hpp"
 #include <cctype>
 #include <format>
@@ -70,9 +71,12 @@ std::pair<bool, std::string> MySQLDatabase::connect() {
 
     try {
         ensureConnectionPoolForDatabase(connectionInfo);
-        spdlog::debug("Successfully connected to MySQL database: {}", connectionInfo.database);
         connected = true;
         setLastConnectionError("");
+
+        db_version::fetchAndStoreServerVersion(*this);
+        spdlog::debug("Successfully connected to MySQL database: {} (version {})",
+                      connectionInfo.database, serverVersion_);
 
         // Start loading databases immediately if showAllDatabases is enabled
         if (connectionInfo.showAllDatabases && !databasesLoaded && !databasesLoader.isRunning()) {
@@ -104,6 +108,7 @@ void MySQLDatabase::disconnect() {
             spdlog::warn("MySQLDatabase::disconnect: skipping pool teardown during shutdown "
                          "(connection setup still in progress)");
             connected = false;
+            clearServerVersion();
             return;
         }
 
@@ -115,6 +120,7 @@ void MySQLDatabase::disconnect() {
         }
         stopSshTunnel();
         connected = false;
+        clearServerVersion();
         return;
     }
 
@@ -127,6 +133,7 @@ void MySQLDatabase::disconnect() {
     }
     stopSshTunnel();
     connected = false;
+    clearServerVersion();
 }
 
 void MySQLDatabase::refreshConnection() {

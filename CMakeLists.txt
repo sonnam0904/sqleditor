@@ -175,6 +175,9 @@ set(APP_SOURCES
     src/database/mysql/mysql_internal.cpp
     src/database/redis.cpp
     src/database/mongodb.cpp
+    src/database/mongodb/mongo_filter.cpp
+    src/database/mongodb/mongo_bson_format.cpp
+    src/database/mongodb/mongo_shell.cpp
     src/database/mongodb/mongodb_database_node.cpp
     src/database/mssql.cpp
     src/database/mssql/mssql_database_node.cpp
@@ -186,11 +189,13 @@ set(APP_SOURCES
     src/database/cassandra/cassandra_database_node.cpp
     src/database/db_factory.cpp
     src/database/db_utils.cpp
+    src/database/server_version.cpp
     src/database/connection_url.cpp
     src/database/sql_builder.cpp
     src/database/ssh_config_parser.cpp
     src/ui/query_history.cpp
     src/ui/table_renderer.cpp
+    src/ui/json_tree_view.cpp
     src/ui/datetime_picker.cpp
     src/ui/auto_complete_input.cpp
     src/ui/database_node.cpp
@@ -243,6 +248,7 @@ if(APPLE)
     list(APPEND APP_SOURCES src/ui/table_aurora_shader.mm)
 elseif(LINUX)
     list(APPEND APP_SOURCES src/platform/linux_platform.cpp)
+    list(APPEND APP_SOURCES src/platform/linux_graphics_env.cpp)
     list(APPEND APP_SOURCES src/platform/opengl_backend.cpp)
     list(APPEND APP_SOURCES src/platform/linux_titlebar.cpp)
     list(APPEND APP_SOURCES src/platform/linux_connection_dialog.cpp)
@@ -324,6 +330,7 @@ if(LINUX)
         ${PROJECT_NAME}
         PRIVATE ${GTK4_INCLUDE_DIRS} ${EPOXY_INCLUDE_DIRS}
     )
+    target_compile_definitions(${PROJECT_NAME} PRIVATE IMGUI_IMPL_OPENGL_ES3)
 endif()
 # SYSTEM to avoid shadowing vcpkg MySQL/OpenSSL headers
 if(SYBDB_INCLUDE_DIR AND NOT SYBDB_INCLUDE_DIR STREQUAL "")
@@ -381,9 +388,16 @@ if(APPLE)
     )
     target_link_libraries(${PROJECT_NAME} PRIVATE "${SPARKLE_FRAMEWORK_PATH}")
 elseif(LINUX)
+    find_package(OpenGL REQUIRED)
     target_link_libraries(
         ${PROJECT_NAME}
-        PRIVATE ${GTK4_LIBRARIES} ${EPOXY_LIBRARIES} ${X11_LIBRARIES}
+        PRIVATE
+            ${GTK4_LIBRARIES}
+            ${EPOXY_LIBRARIES}
+            ${X11_LIBRARIES}
+            OpenGL::GL
+            OpenGL::EGL
+            OpenGL::GLES2
     )
     target_link_directories(
         ${PROJECT_NAME}
