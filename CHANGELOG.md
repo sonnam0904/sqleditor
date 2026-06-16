@@ -1,3 +1,9 @@
+## [1.2.1](https://github.com/sonnam0904/sqleditor/compare/v1.2.0...v1.2.1) (2026-06-16)
+
+### Bug Fixes
+
+* updated CMake configuration to install the sqleditor-mongo3-bridge alongside the main application. ([733a0fc](https://github.com/sonnam0904/sqleditor/commit/733a0fcb70479b48d6f8ceb40fbbbfaa8996f904))
+
 ## [1.2.0](https://github.com/sonnam0904/sqleditor/compare/v1.1.0...v1.2.0) (2026-06-16)
 
 ### Features
