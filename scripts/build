@@ -40,8 +40,14 @@ else
     echo "Skipping CMake configure (already configured). Use --reconfigure to force."
 fi
 
-echo "Building ${APP_NAME}..."
-cmake --build "$BUILD_DIR" --target sqleditor
+echo "Building ${APP_NAME} and MongoDB Old bridge..."
+cmake --build "$BUILD_DIR" --target sqleditor sqleditor-mongo3-bridge
+
+MONGO3_BRIDGE="$BUILD_DIR/sqleditor-mongo3-bridge"
+if [[ ! -x "$MONGO3_BRIDGE" ]]; then
+    echo "Error: sqleditor-mongo3-bridge not found at $MONGO3_BRIDGE"
+    exit 1
+fi
 
 if [[ "$(uname)" == "Darwin" ]]; then
     echo "Build complete: $BUILD_DIR/${APP_NAME}.app"
@@ -97,6 +103,8 @@ mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
 install -m755 "$BUILD_DIR/${APP_NAME}" "$APPDIR/usr/bin/${APP_NAME}"
+install -m755 "$MONGO3_BRIDGE" "$APPDIR/usr/bin/sqleditor-mongo3-bridge"
+echo "Bundled sqleditor-mongo3-bridge into AppImage"
 install -m644 "$ROOT_DIR/packaging/$APP_IDENTIFIER.desktop" \
     "$APPDIR/usr/share/applications/$APP_IDENTIFIER.desktop"
 install -m644 "$ROOT_DIR/assets/appicon.png" \
@@ -120,6 +128,8 @@ export PATH="$(dirname "$GTK_PLUGIN"):$PATH"
 
 OUTPUT="$APPIMAGE_FILE" LDAI_RUNTIME_FILE="$RUNTIME_FILE" "$LINUXDEPLOY" \
     --appdir "$APPDIR" \
+    --executable "$APPDIR/usr/bin/${APP_NAME}" \
+    --executable "$APPDIR/usr/bin/sqleditor-mongo3-bridge" \
     --desktop-file "$APPDIR/usr/share/applications/$APP_IDENTIFIER.desktop" \
     --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP_IDENTIFIER.png" \
     --plugin gtk \
@@ -128,3 +138,34 @@ OUTPUT="$APPIMAGE_FILE" LDAI_RUNTIME_FILE="$RUNTIME_FILE" "$LINUXDEPLOY" \
 sha256sum "$APPIMAGE_FILE" > "${APPIMAGE_FILE}.sha256"
 APPIMAGE_SIZE=$(du -h "$APPIMAGE_FILE" | cut -f1)
 echo "AppImage created: $APPIMAGE_FILE ($APPIMAGE_SIZE)"
+
+# ---- .deb packaging ----
+if ! command -v dpkg-deb >/dev/null 2>&1; then
+    echo "Warning: dpkg-deb not found; skipping .deb package"
+    exit 0
+fi
+
+DEB_PKG_DIR="$BUILD_DIR/${APP_IDENTIFIER}_${APP_VERSION}_amd64"
+rm -rf "$DEB_PKG_DIR"
+mkdir -p "$DEB_PKG_DIR/DEBIAN"
+
+echo "Packaging .deb..."
+cmake --install "$BUILD_DIR" --prefix "$DEB_PKG_DIR/usr"
+
+cat > "$DEB_PKG_DIR/DEBIAN/control" <<EOF
+Package: sqleditor
+Version: ${APP_VERSION}
+Section: database
+Priority: optional
+Architecture: amd64
+Maintainer: SQLEditor
+Description: SQLEditor database client
+ Multi-database SQL editor and browser.
+Depends: libc6, libstdc++6, libgtk-4-1, libepoxy0, libx11-6, libssl3, libicu74 | libicu72 | libicu70
+EOF
+
+DEB_FILE="$BUILD_DIR/${APP_NAME}_${APP_VERSION}_amd64.deb"
+dpkg-deb --build --root-owner-group "$DEB_PKG_DIR" "$DEB_FILE"
+sha256sum "$DEB_FILE" > "${DEB_FILE}.sha256"
+DEB_SIZE=$(du -h "$DEB_FILE" | cut -f1)
+echo ".deb created: $DEB_FILE ($DEB_SIZE)"

@@ -503,7 +503,7 @@ endif()
 include(cmake/Tests.cmake)
 
 if(LINUX)
-    install(TARGETS ${PROJECT_NAME} DESTINATION bin)
+    install(TARGETS ${PROJECT_NAME} sqleditor-mongo3-bridge DESTINATION bin)
     install(
         FILES packaging/com.sqleditor.app.desktop
         DESTINATION share/applications
