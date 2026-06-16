@@ -7,6 +7,7 @@
 #include "database/mongodb/mongo_bson_format.hpp"
 #include "database/mongodb/mongo_filter.hpp"
 #include "database/mongodb/mongodb_database_node.hpp"
+#include "database/mongodb_old/mongodb_old_database_node.hpp"
 #include "database/sql_builder.hpp"
 #include "imgui.h"
 #include "themes.hpp"
@@ -698,6 +699,9 @@ void TableViewerTab::loadDataAsync() {
                 if (auto* mongoNode = dynamic_cast<MongoDBDatabaseNode*>(node_)) {
                     mongoDocumentJson_ = mongoNode->getCollectionDocumentsAsJson(
                         table_, rowsPerPage, offset, currentFilter, orderByClause);
+                } else if (auto* mongoOldNode = dynamic_cast<MongoDBOldDatabaseNode*>(node_)) {
+                    mongoDocumentJson_ = mongoOldNode->getCollectionDocumentsAsJson(
+                        table_, rowsPerPage, offset, currentFilter, orderByClause);
                 }
             }
 
@@ -1049,7 +1053,7 @@ void TableViewerTab::applyFilter() {
     }
 
     filterParseError = false;
-    if (node_->getDatabaseType() == DatabaseType::MONGODB && !newFilter.empty()) {
+    if (isMongoDbType(node_->getDatabaseType()) && !newFilter.empty()) {
         filterParseError = !isValidMongoFilter(newFilter);
     }
 
@@ -1541,7 +1545,7 @@ void TableViewerTab::renderMetadataTab() {
 }
 
 bool TableViewerTab::isMongoCollection() const {
-    return node_ && node_->getDatabaseType() == DatabaseType::MONGODB;
+    return node_ && isMongoDbType(node_->getDatabaseType());
 }
 
 void TableViewerTab::renderMongoJsonView(float /*width*/, float height) {

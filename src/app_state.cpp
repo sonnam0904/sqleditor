@@ -44,6 +44,10 @@ namespace {
             conn.connectionInfo.type = DatabaseType::REDIS;
         } else if (typeStr == "mongodb") {
             conn.connectionInfo.type = DatabaseType::MONGODB;
+        } else if (typeStr == "mongodb_legacy") {
+            conn.connectionInfo.type = DatabaseType::MONGODB_LEGACY;
+        } else if (typeStr == "mongodb_old") {
+            conn.connectionInfo.type = DatabaseType::MONGODB_OLD;
         } else if (typeStr == "mariadb") {
             conn.connectionInfo.type = DatabaseType::MARIADB;
         } else if (typeStr == "mssql") {
@@ -416,6 +420,12 @@ int AppState::saveConnection(const SavedConnection& connection) const {
     case DatabaseType::MONGODB:
         typeStr = "mongodb";
         break;
+    case DatabaseType::MONGODB_LEGACY:
+        typeStr = "mongodb_legacy";
+        break;
+    case DatabaseType::MONGODB_OLD:
+        typeStr = "mongodb_old";
+        break;
     case DatabaseType::MARIADB:
         typeStr = "mariadb";
         break;
@@ -535,6 +545,12 @@ bool AppState::updateConnection(const SavedConnection& connection) const {
         break;
     case DatabaseType::MONGODB:
         typeStr = "mongodb";
+        break;
+    case DatabaseType::MONGODB_LEGACY:
+        typeStr = "mongodb_legacy";
+        break;
+    case DatabaseType::MONGODB_OLD:
+        typeStr = "mongodb_old";
         break;
     case DatabaseType::MARIADB:
         typeStr = "mariadb";

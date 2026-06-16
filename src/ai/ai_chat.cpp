@@ -94,6 +94,7 @@ std::string AIChatState::dbTypeName() const {
     case DatabaseType::MARIADB:
         return "MariaDB";
     case DatabaseType::MONGODB:
+    case DatabaseType::MONGODB_LEGACY:
         return "MongoDB";
     case DatabaseType::REDIS:
         return "Redis";
@@ -112,7 +113,7 @@ std::string AIChatState::buildSchemaContext(std::stop_token stopToken) const {
         return "(schema not loaded)";
     }
 
-    const bool isMongo = node_->getDatabaseType() == DatabaseType::MONGODB;
+    const bool isMongo = isMongoDbType(node_->getDatabaseType());
     std::string ctx;
     for (const auto& table : node_->getTables()) {
         if (stopToken.stop_requested())
@@ -169,7 +170,7 @@ std::string AIChatState::buildSystemPrompt(std::stop_token stopToken) const {
     if (stopToken.stop_requested())
         return "";
 
-    bool isMongo = node_ && node_->getDatabaseType() == DatabaseType::MONGODB;
+    bool isMongo = node_ && isMongoDbType(node_->getDatabaseType());
 
     if (isMongo) {
         return std::format("You are a MongoDB query assistant.\n"

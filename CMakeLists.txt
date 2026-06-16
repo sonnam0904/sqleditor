@@ -136,6 +136,7 @@ find_package(spdlog CONFIG REQUIRED)
 include(cmake/FreeTDS.cmake)
 include(cmake/OracleOCI.cmake)
 include(cmake/CassandraDriver.cmake)
+include(cmake/MongoLegacyBridge.cmake)
 
 enable_testing()
 
@@ -179,6 +180,9 @@ set(APP_SOURCES
     src/database/mongodb/mongo_bson_format.cpp
     src/database/mongodb/mongo_shell.cpp
     src/database/mongodb/mongodb_database_node.cpp
+    src/database/mongodb_old/mongodb_old.cpp
+    src/database/mongodb_old/mongodb_old_database_node.cpp
+    src/database/mongodb_old/mongo_legacy_client.cpp
     src/database/mssql.cpp
     src/database/mssql/mssql_database_node.cpp
     src/database/mssql/mssql_schema_node.cpp
@@ -471,6 +475,28 @@ if(APPLE)
             "$<TARGET_FILE:sentry::sentry>"
             "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks/"
         COMMENT "Embedding sentry dylib into app bundle"
+    )
+endif()
+
+if(APPLE)
+    add_custom_command(
+        TARGET ${PROJECT_NAME}
+        POST_BUILD
+        COMMAND
+            ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:sqleditor-mongo3-bridge>"
+            "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/MacOS/"
+        COMMENT "Copying MongoDB Old bridge into app bundle"
+    )
+else()
+    add_custom_command(
+        TARGET ${PROJECT_NAME}
+        POST_BUILD
+        COMMAND
+            ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:sqleditor-mongo3-bridge>"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+        COMMENT "Copying MongoDB Old bridge next to executable"
     )
 endif()
 

@@ -1,0 +1,16 @@
+services:
+  mongo42:
+    image: mongo:4.2
+    container_name: sqleditor-mongo42
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo42_data:/data/db
+    # Bỏ comment 3 dòng dưới nếu muốn test có auth
+    # environment:
+    #   MONGO_INITDB_ROOT_USERNAME: admin
+    #   MONGO_INITDB_ROOT_PASSWORD: secret
+
+volumes:
+  mongo42_data:

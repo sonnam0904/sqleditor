@@ -4,6 +4,7 @@
 #include "database/connection_url.hpp"
 #include "database/db_interface.hpp"
 #include "database/mongodb.hpp"
+#include "database/mongodb_old.hpp"
 #include "database/mssql.hpp"
 #include "database/mysql.hpp"
 #include "database/oracle.hpp"
@@ -318,7 +319,9 @@ static NSWindow* sActiveConnectionDialog = nil;
     case DatabaseType::MARIADB:
     case DatabaseType::ORACLE:
     case DatabaseType::CASSANDRA:
-    case DatabaseType::MONGODB: {
+    case DatabaseType::MONGODB:
+    case DatabaseType::MONGODB_LEGACY:
+    case DatabaseType::MONGODB_OLD: {
         self.hostField.stringValue = [NSString stringWithUTF8String:info.host.c_str()];
         self.portField.stringValue = [NSString stringWithFormat:@"%d", info.port];
         self.databaseField.stringValue = [NSString stringWithUTF8String:info.database.c_str()];
@@ -426,6 +429,8 @@ static NSWindow* sActiveConnectionDialog = nil;
     [self.typePopup addItemWithTitle:@"MariaDB"];
     [self.typePopup addItemWithTitle:@"Redis"];
     [self.typePopup addItemWithTitle:@"MongoDB"];
+    [self.typePopup addItemWithTitle:@"MongoDB Legacy (4.2+)"];
+    [self.typePopup addItemWithTitle:@"MongoDB Old (ver 3)"];
     [self.typePopup addItemWithTitle:@"MSSQL"];
     [self.typePopup addItemWithTitle:@"Oracle"];
     [self.typePopup addItemWithTitle:@"Redshift"];
@@ -1165,6 +1170,8 @@ static NSWindow* sActiveConnectionDialog = nil;
         self.authSegment.selectedSegment = 0;
         break;
     case DatabaseType::MONGODB:
+    case DatabaseType::MONGODB_LEGACY:
+    case DatabaseType::MONGODB_OLD:
         self.portField.stringValue = @"27017";
         self.authSegment.selectedSegment = 1; // Default no auth
         break;
@@ -1558,7 +1565,7 @@ static NSWindow* sActiveConnectionDialog = nil;
     std::shared_ptr<DatabaseInterface> editingDbCopy = _editingDb;
 
     // Validate
-    if (authEnabled && username.empty() && type != DatabaseType::MONGODB &&
+    if (authEnabled && username.empty() && !isMongoDbType(type) &&
         type != DatabaseType::REDIS) {
         [self setStatusText:@"Please enter a username" color:[NSColor systemRedColor]];
         return;
@@ -1627,8 +1634,13 @@ static NSWindow* sActiveConnectionDialog = nil;
           db = std::make_shared<MySQLDatabase>(info);
           break;
       case DatabaseType::MONGODB:
+      case DatabaseType::MONGODB_LEGACY:
           info.database = database;
           db = std::make_shared<MongoDBDatabase>(info);
+          break;
+      case DatabaseType::MONGODB_OLD:
+          info.database = database;
+          db = std::make_shared<MongoDBOldDatabase>(info);
           break;
       case DatabaseType::REDIS:
           db = std::make_shared<RedisDatabase>(info);

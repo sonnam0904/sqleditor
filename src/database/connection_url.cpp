@@ -72,6 +72,8 @@ namespace {
             {"mariadb", {DatabaseType::MARIADB, 3306, false}},
             {"mongodb", {DatabaseType::MONGODB, 27017, false}},
             {"mongodb+srv", {DatabaseType::MONGODB, 27017, false}},
+            {"mongodb-legacy", {DatabaseType::MONGODB_LEGACY, 27017, false}},
+            {"mongodb-old", {DatabaseType::MONGODB_OLD, 27017, false}},
             {"redis", {DatabaseType::REDIS, 6379, false}},
             {"rediss", {DatabaseType::REDIS, 6379, true}},
             {"mssql", {DatabaseType::MSSQL, 1433, false}},
@@ -182,7 +184,15 @@ std::string buildConnectionUrl(const DatabaseConnectionInfo& info) {
         scheme = "mariadb";
         break;
     case DatabaseType::MONGODB:
-        scheme = "mongodb";
+    case DatabaseType::MONGODB_LEGACY:
+    case DatabaseType::MONGODB_OLD:
+        if (info.type == DatabaseType::MONGODB_LEGACY) {
+            scheme = "mongodb-legacy";
+        } else if (info.type == DatabaseType::MONGODB_OLD) {
+            scheme = "mongodb-old";
+        } else {
+            scheme = "mongodb";
+        }
         break;
     case DatabaseType::REDIS:
         // rediss:// when TLS is on, redis:// otherwise.
@@ -216,7 +226,7 @@ std::string buildConnectionUrl(const DatabaseConnectionInfo& info) {
     // IPv6 literals need [brackets]; assume a string containing ':' that is
     // not already bracketed is IPv6.
     const bool mongoSeedList =
-        info.type == DatabaseType::MONGODB && info.host.find(',') != std::string::npos;
+        isMongoDbType(info.type) && info.host.find(',') != std::string::npos;
 
     if (mongoSeedList) {
         url += info.host;
@@ -250,7 +260,7 @@ std::string buildConnectionUrl(const DatabaseConnectionInfo& info) {
         query += v;
     };
 
-    if (info.type == DatabaseType::MONGODB && !info.mongoOptions.empty()) {
+    if (isMongoDbType(info.type) && !info.mongoOptions.empty()) {
         if (!query.empty()) {
             query.push_back('&');
         }
@@ -263,7 +273,7 @@ std::string buildConnectionUrl(const DatabaseConnectionInfo& info) {
         }
     }
     if (!info.sslCACertPath.empty()) {
-        addParam(info.type == DatabaseType::MONGODB ? "tlsCAFile" : "sslrootcert",
+        addParam(isMongoDbType(info.type) ? "tlsCAFile" : "sslrootcert",
                  percentEncode(info.sslCACertPath));
     }
 
@@ -308,8 +318,7 @@ ConnectionUrlParseResult parseConnectionUrl(const std::string& url) {
     r.info.port = schemeInfo->defaultPort;
     if (schemeInfo->tls) {
         r.info.sslmode = SslMode::Require;
-    } else if (schemeInfo->type == DatabaseType::MONGODB ||
-               schemeInfo->type == DatabaseType::REDIS) {
+    } else if (isMongoDbType(schemeInfo->type) || schemeInfo->type == DatabaseType::REDIS) {
         // simple-ssl backends default to off; server backends keep their type default.
         r.info.sslmode = SslMode::Disable;
     }
@@ -385,8 +394,7 @@ ConnectionUrlParseResult parseConnectionUrl(const std::string& url) {
                 return r;
             }
         }
-    } else if (schemeInfo->type == DatabaseType::MONGODB &&
-               hostport.find(',') != std::string_view::npos) {
+    } else if (isMongoDbType(schemeInfo->type) && hostport.find(',') != std::string_view::npos) {
         // Replica set / sharded cluster seed list: host1:port1,host2:port2,...
         r.info.host = std::string(hostport);
         r.info.port = schemeInfo->defaultPort;
@@ -445,7 +453,7 @@ ConnectionUrlParseResult parseConnectionUrl(const std::string& url) {
             return r;
         }
         const std::string keyLower = toLower(keyDec);
-        if (r.info.type == DatabaseType::MONGODB && !isMongoTlsQueryKey(keyLower)) {
+        if (isMongoDbType(r.info.type) && !isMongoTlsQueryKey(keyLower)) {
             if (!mongoOpts.empty()) {
                 mongoOpts += '&';
             }

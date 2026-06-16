@@ -5,6 +5,7 @@
 #include "database/cassandra/cassandra_database_node.hpp"
 #include "database/db_interface.hpp"
 #include "database/mongodb/mongodb_database_node.hpp"
+#include "database/mongodb_old/mongodb_old_database_node.hpp"
 #include "database/mssql/mssql_database_node.hpp"
 #include "database/mysql/mysql_database_node.hpp"
 #include "database/oracle/oracle_database_node.hpp"
@@ -128,7 +129,7 @@ private:
     void renderMySQLDatabaseNode(MySQLDatabaseNode* dbData);
     void renderMSSQLDatabaseNode(MSSQLDatabaseNode* dbData);
     void renderOracleDatabaseNode(OracleDatabaseNode* dbData);
-    void renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData);
+    void renderMongoDBDatabaseNode(IDatabaseNode* dbData);
     void renderCassandraDatabaseNode(CassandraDatabaseNode* dbData);
     void renderSQLiteNode();
 
@@ -143,7 +144,7 @@ private:
     void renderMSSQLViewNode(Table& view, MSSQLSchemaNode* schemaData);
     void renderOracleTableNode(Table& table, OracleDatabaseNode* dbData);
     void renderOracleViewNode(Table& view, OracleDatabaseNode* dbData);
-    void renderMongoDBCollectionNode(Table& collection, MongoDBDatabaseNode* dbData);
+    void renderMongoDBCollectionNode(Table& collection, IDatabaseNode* dbData);
     void renderCassandraTableNode(Table& table, CassandraDatabaseNode* dbData);
     void renderCassandraViewNode(Table& view, CassandraDatabaseNode* dbData);
     void renderSQLiteTableNode(Table& table, SQLiteDatabase* sqliteDb);

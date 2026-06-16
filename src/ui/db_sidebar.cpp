@@ -4,6 +4,7 @@
 #include "database/cassandra.hpp"
 #include "database/db_interface.hpp"
 #include "database/mongodb.hpp"
+#include "database/mongodb_old.hpp"
 #include "database/mssql.hpp"
 #include "database/mysql.hpp"
 #include "database/oracle.hpp"
@@ -26,6 +27,30 @@
 #include <memory>
 #include <ranges>
 #include <spdlog/spdlog.h>
+
+namespace {
+
+    std::string truncateToWidth(std::string text, const float maxWidth) {
+        if (maxWidth <= 0.0f || text.empty()) {
+            return text;
+        }
+        if (ImGui::CalcTextSize(text.c_str()).x <= maxWidth) {
+            return text;
+        }
+
+        constexpr const char* kEllipsis = "...";
+        const float ellipsisWidth = ImGui::CalcTextSize(kEllipsis).x;
+        while (!text.empty()) {
+            text.pop_back();
+            const std::string candidate = text + kEllipsis;
+            if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
+                return candidate;
+            }
+        }
+        return kEllipsis;
+    }
+
+} // namespace
 
 DatabaseHierarchy* DatabaseSidebarNew::getHierarchy(const std::shared_ptr<DatabaseInterface>& db) {
     if (!db) {
@@ -513,21 +538,39 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
         texturesLoaded_ = true;
     }
 
-    const std::string dbLabel = [&]() {
-        std::string visibleName = connectionInfo.name;
-        if (db->isConnected()) {
-            const auto& version = db->getServerVersion();
-            if (!version.empty()) {
-                visibleName = std::format("{}  v{}", connectionInfo.name, version);
-            }
+    constexpr float connectBtnW = 76.0f;
+    constexpr float disconnectBtnW = 88.0f;
+    const float actionBtnW = db->isConnected() ? disconnectBtnW : connectBtnW;
+
+    std::string versionLabel;
+    if (db->isConnected()) {
+        const auto& version = db->getServerVersion();
+        if (!version.empty()) {
+            versionLabel = std::format("v{}", version);
         }
-        return std::format("   {}###db_{:p}", visibleName, static_cast<const void*>(db.get()));
-    }();
+    }
+    const float versionW =
+        versionLabel.empty() ? 0.0f : ImGui::CalcTextSize(versionLabel.c_str()).x;
+    const float versionGap = versionLabel.empty() ? 0.0f : Theme::Spacing::S;
+    const float rightEdge =
+        ImGui::GetContentRegionMax().x - ImGui::GetWindowPos().x - Theme::Spacing::S;
+    const float rightReserved = actionBtnW + versionGap + versionW + Theme::Spacing::S;
+    const float iconSize = texMgr.getIconSize();
+    const float treeChromeReserve =
+        ImGui::GetTreeNodeToLabelSpacing() + iconSize + ImGui::GetStyle().FramePadding.x * 2.0f;
+    const float maxNameWidth =
+        std::max(32.0f, ImGui::GetContentRegionAvail().x - rightReserved - treeChromeReserve);
+    const std::string visibleName =
+        truncateToWidth(connectionInfo.name, maxNameWidth);
+
+    dbFlags |= ImGuiTreeNodeFlags_AllowOverlap;
+
+    const std::string dbLabel =
+        std::format("   {}###db_{:p}", visibleName, static_cast<const void*>(db.get()));
     const bool dbOpen = ImGui::TreeNodeEx(dbLabel.c_str(), dbFlags);
     const ImVec2 nodeMin = ImGui::GetItemRectMin();
     const ImVec2 nodeMax = ImGui::GetItemRectMax();
 
-    const float iconSize = texMgr.getIconSize();
     const auto dbIconPos = ImVec2(nodeMin.x + ImGui::GetTreeNodeToLabelSpacing(),
                                   nodeMin.y + ((nodeMax.y - nodeMin.y) - iconSize) * 0.5f);
 
@@ -546,9 +589,7 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
     }
 
     if (!db->isConnected()) {
-        constexpr float connectBtnW = 76.0f;
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::GetWindowPos().x - connectBtnW -
-                        Theme::Spacing::S);
+        ImGui::SameLine(rightEdge - actionBtnW);
         if (db->isConnecting()) {
             ImGui::BeginDisabled();
             ImGui::Button("Connecting...", ImVec2(connectBtnW, 0));
@@ -557,9 +598,14 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
             db->startConnectionAsync();
         }
     } else {
-        constexpr float disconnectBtnW = 88.0f;
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::GetWindowPos().x - disconnectBtnW -
-                        Theme::Spacing::S);
+        if (!versionLabel.empty()) {
+            ImGui::SameLine(rightEdge - actionBtnW - versionGap - versionW);
+            ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(versionLabel.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::SameLine(rightEdge - disconnectBtnW);
         if (ImGui::Button("Disconnect", ImVec2(disconnectBtnW, 0))) {
             db->disconnect();
             db->setAttemptedConnection(false);
@@ -586,7 +632,11 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
         tryRefresh.template operator()<MySQLDatabase>();
         break;
     case DatabaseType::MONGODB:
+    case DatabaseType::MONGODB_LEGACY:
         tryRefresh.template operator()<MongoDBDatabase>();
+        break;
+    case DatabaseType::MONGODB_OLD:
+        tryRefresh.template operator()<MongoDBOldDatabase>();
         break;
     case DatabaseType::MSSQL:
         tryRefresh.template operator()<MSSQLDatabase>();
@@ -629,7 +679,11 @@ void DatabaseSidebarNew::renderDatabaseNode(const std::shared_ptr<DatabaseInterf
             collectNames.template operator()<OracleDatabase>();
             break;
         case DatabaseType::MONGODB:
+        case DatabaseType::MONGODB_LEGACY:
             collectNames.template operator()<MongoDBDatabase>();
+            break;
+        case DatabaseType::MONGODB_OLD:
+            collectNames.template operator()<MongoDBOldDatabase>();
             break;
         case DatabaseType::REDIS:
             if (auto* redisDb = dynamic_cast<RedisDatabase*>(db.get()))

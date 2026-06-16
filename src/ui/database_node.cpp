@@ -3,9 +3,10 @@
 #include "IconsForkAwesome.h"
 #include "application.hpp"
 #include "database/cassandra.hpp"
-#include "database/database_node.hpp"
+#include "database/table_data_provider.hpp"
 #include "database/db_interface.hpp"
 #include "database/mongodb.hpp"
+#include "database/mongodb_old.hpp"
 #include "database/mssql.hpp"
 #include "database/mysql.hpp"
 #include "database/oracle.hpp"
@@ -431,7 +432,32 @@ void DatabaseHierarchy::renderRootNode() {
                 }
             }
         }
-    } else if (dbType == DatabaseType::MONGODB) {
+    } else if (dbType == DatabaseType::MONGODB_OLD) {
+        auto* mongoOldDb = dynamic_cast<MongoDBOldDatabase*>(db.get());
+        if (!mongoOldDb) {
+            return;
+        }
+
+        if (!mongoOldDb->areDatabasesLoaded() && !mongoOldDb->isLoadingDatabases()) {
+            mongoOldDb->refreshDatabaseNames();
+        }
+
+        if (mongoOldDb->isLoadingDatabases()) {
+            mongoOldDb->checkDatabasesStatusAsync();
+            ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
+            ImGui::TextUnformatted(LOADING_LABEL);
+            ImGui::SameLine(0, Theme::Spacing::S);
+            UIUtils::Spinner("##loading_dbs_spinner", 6.0f, 2, ImGui::GetColorU32(colors.peach));
+            ImGui::PopStyleColor();
+        } else if (mongoOldDb->areDatabasesLoaded()) {
+            const auto& databases = mongoOldDb->getDatabaseDataMap() | std::views::values;
+            for (const auto& dbDataPtr : databases) {
+                if (dbDataPtr && !hiddenDatabases_.contains(dbDataPtr->name)) {
+                    renderMongoDBDatabaseNode(dbDataPtr.get());
+                }
+            }
+        }
+    } else if (isMongoDbType(dbType)) {
         auto* mongoDb = dynamic_cast<MongoDBDatabase*>(db.get());
         if (!mongoDb) {
             return;
@@ -3456,21 +3482,26 @@ void DatabaseHierarchy::renderOracleViewNode(Table& view, OracleDatabaseNode* db
     }
 }
 
-void DatabaseHierarchy::renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData) {
+void DatabaseHierarchy::renderMongoDBDatabaseNode(IDatabaseNode* dbData) {
     if (!dbData) {
         return;
     }
 
     auto& app = Application::getInstance();
     const auto& colors = app.getCurrentColors();
+    const std::string dbName = dbData->getName();
 
-    const std::string nodeId = std::format("db_{}_{:p}", dbData->name, static_cast<void*>(dbData));
-    const bool isOpen = renderTreeNodeWithIcon(dbData->name, nodeId, ICON_FK_DATABASE,
+    const std::string nodeId = std::format("db_{}_{:p}", dbName, static_cast<void*>(dbData));
+    const bool isOpen = renderTreeNodeWithIcon(dbName, nodeId, ICON_FK_DATABASE,
                                                ImGui::GetColorU32(colors.green),
                                                kDefaultTreeNodeFlags, true);
 
     if (ImGui::IsItemToggledOpen()) {
-        dbData->expanded = isOpen;
+        if (auto* mongo = dynamic_cast<MongoDBDatabaseNode*>(dbData)) {
+            mongo->expanded = isOpen;
+        } else if (auto* mongoOld = dynamic_cast<MongoDBOldDatabaseNode*>(dbData)) {
+            mongoOld->expanded = isOpen;
+        }
     }
 
     // Context menu
@@ -3481,11 +3512,10 @@ void DatabaseHierarchy::renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData) {
             app.getTabManager()->createMongoEditorTab(dbData);
         }
         if (ImGui::MenuItem(REFRESH_LABEL)) {
-            dbData->startCollectionsLoadAsync(true);
+            dbData->startTablesLoadAsync(true);
         }
         ImGui::Separator();
         if (ImGui::MenuItem(DELETE_LABEL)) {
-            const std::string dbName = dbData->name;
             Alert::show(
                 "Delete Database",
                 std::format("Permanently delete '{}' and ALL its data? This is irreversible.",
@@ -3498,6 +3528,9 @@ void DatabaseHierarchy::renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData) {
                           spdlog::debug("Database '{}' deleted successfully", dbName);
                           if (auto* mongoDb = dynamic_cast<MongoDBDatabase*>(db.get())) {
                               mongoDb->refreshDatabaseNames();
+                          } else if (auto* mongoOldDb =
+                                         dynamic_cast<MongoDBOldDatabase*>(db.get())) {
+                              mongoOldDb->refreshDatabaseNames();
                           }
                       } else {
                           spdlog::error("Failed to delete database: {}", error);
@@ -3511,10 +3544,10 @@ void DatabaseHierarchy::renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData) {
     }
 
     if (isOpen) {
-        // Render Collections section
+        auto& collections = dbData->getTables();
         {
             const std::string collectionsNodeId = std::format(
-                "collections_{}_{:p}", dbData->name, static_cast<void*>(&dbData->collections));
+                "collections_{}_{:p}", dbName, static_cast<void*>(&collections));
             const bool collectionsOpen = renderTreeNodeWithIcon(
                 "Collections", collectionsNodeId, ICON_FK_TABLE, ImGui::GetColorU32(colors.green),
                 kDefaultTreeNodeFlags, true);
@@ -3524,32 +3557,32 @@ void DatabaseHierarchy::renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData) {
                 ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
                                     ImVec2(Theme::Spacing::M, Theme::Spacing::M));
                 if (ImGui::MenuItem(REFRESH_LABEL)) {
-                    dbData->startCollectionsLoadAsync(true);
+                    dbData->startTablesLoadAsync(true);
                 }
                 ImGui::PopStyleVar();
                 ImGui::EndPopup();
             }
 
             if (collectionsOpen) {
-                if (!dbData->collectionsLoaded && !dbData->collectionsLoader.isRunning()) {
-                    dbData->startCollectionsLoadAsync();
+                if (!dbData->isTablesLoaded() && !dbData->isLoadingTables()) {
+                    dbData->startTablesLoadAsync();
                 }
 
-                if (dbData->collectionsLoader.isRunning()) {
-                    dbData->checkCollectionsStatusAsync();
+                if (dbData->isLoadingTables()) {
+                    dbData->checkLoadingStatus();
                     ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
                     ImGui::TextUnformatted(LOADING_LABEL);
                     ImGui::SameLine(0, Theme::Spacing::S);
                     UIUtils::Spinner("##loading_collections", 6.0f, 2,
                                      ImGui::GetColorU32(colors.peach));
                     ImGui::PopStyleColor();
-                } else if (dbData->collectionsLoaded) {
-                    if (dbData->collections.empty()) {
+                } else if (dbData->isTablesLoaded()) {
+                    if (collections.empty()) {
                         ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
                         ImGui::Text("  No collections");
                         ImGui::PopStyleColor();
                     } else {
-                        for (auto& collection : dbData->collections) {
+                        for (auto& collection : collections) {
                             if (!matchesTableSearch(collection.name)) {
                                 continue;
                             }
@@ -3566,7 +3599,7 @@ void DatabaseHierarchy::renderMongoDBDatabaseNode(MongoDBDatabaseNode* dbData) {
 }
 
 void DatabaseHierarchy::renderMongoDBCollectionNode(Table& collection,
-                                                    MongoDBDatabaseNode* dbData) {
+                                                    IDatabaseNode* dbData) {
     auto& app = Application::getInstance();
     const auto& colors = app.getCurrentColors();
 
@@ -3616,10 +3649,20 @@ void DatabaseHierarchy::renderMongoDBCollectionNode(Table& collection,
         const bool isMultiSelect =
             selectedTables_.size() > 1 && selectedTables_.count(&collection) > 0;
         if (isMultiSelect) {
-            renderMultiSelectMenuContent(
-                dbData, dbData->getTables(),
-                [dbData](const std::string& n) { dbData->dropCollection(n); },
-                dbData->getDatabaseType());
+            auto* provider = dynamic_cast<ITableDataProvider*>(dbData);
+            if (provider) {
+                renderMultiSelectMenuContent(
+                    provider, dbData->getTables(),
+                    [dbData](const std::string& n) {
+                        if (auto* mongo = dynamic_cast<MongoDBDatabaseNode*>(dbData)) {
+                            mongo->dropCollection(n);
+                        } else if (auto* mongoOld =
+                                         dynamic_cast<MongoDBOldDatabaseNode*>(dbData)) {
+                            mongoOld->dropCollection(n);
+                        }
+                    },
+                    dbData->getDatabaseType());
+            }
         } else {
             if (ImGui::MenuItem(VIEW_DATA_LABEL)) {
                 app.getTabManager()->createTableViewerTab(dbData, collection);
@@ -3638,10 +3681,17 @@ void DatabaseHierarchy::renderMongoDBCollectionNode(Table& collection,
                     {{"Cancel", nullptr, AlertButton::Style::Cancel},
                      {"Delete",
                       [dbData, collName]() {
-                          auto [success, error] = dbData->dropCollection(collName);
-                          if (!success) {
+                          std::pair<bool, std::string> result{false, "unsupported"};
+                          if (auto* mongo = dynamic_cast<MongoDBDatabaseNode*>(dbData)) {
+                              result = mongo->dropCollection(collName);
+                          } else if (auto* mongoOld =
+                                         dynamic_cast<MongoDBOldDatabaseNode*>(dbData)) {
+                              result = mongoOld->dropCollection(collName);
+                          }
+                          if (!result.first) {
                               Alert::show("Error",
-                                          std::format("Failed to delete collection: {}", error));
+                                          std::format("Failed to delete collection: {}",
+                                                      result.second));
                           }
                       },
                       AlertButton::Style::Destructive}});

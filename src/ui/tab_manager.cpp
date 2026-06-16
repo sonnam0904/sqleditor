@@ -415,7 +415,7 @@ std::shared_ptr<Tab> TabManager::createDiagramTab(IDatabaseNode* node) {
     return tab;
 }
 
-std::shared_ptr<Tab> TabManager::createMongoEditorTab(MongoDBDatabaseNode* node) {
+std::shared_ptr<Tab> TabManager::createMongoEditorTab(IDatabaseNode* node) {
     if (!node)
         return nullptr;
 

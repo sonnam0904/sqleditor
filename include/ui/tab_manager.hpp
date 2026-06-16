@@ -8,7 +8,7 @@
 #include <vector>
 
 class IDatabaseNode;
-class MongoDBDatabaseNode;
+class IDatabaseNode;
 class PostgresSchemaNode;
 class RedisDatabase;
 class SQLiteDatabase;
@@ -57,7 +57,7 @@ public:
 
     std::shared_ptr<Tab> createDiagramTab(IDatabaseNode* node);
 
-    std::shared_ptr<Tab> createMongoEditorTab(MongoDBDatabaseNode* node);
+    std::shared_ptr<Tab> createMongoEditorTab(IDatabaseNode* node);
 
     std::shared_ptr<Tab> createRedisCommandEditorTab(RedisDatabase* db);
     std::shared_ptr<Tab> createRedisKeyViewerTab(RedisDatabase* db, const std::string& pattern,

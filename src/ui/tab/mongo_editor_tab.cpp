@@ -354,7 +354,7 @@ namespace {
     }
 } // namespace
 
-MongoEditorTab::MongoEditorTab(const std::string& name, MongoDBDatabaseNode* node)
+MongoEditorTab::MongoEditorTab(const std::string& name, IDatabaseNode* node)
     : Tab(name, TabType::MONGO_EDITOR), node_(node) {
     editor_.SetShowLineNumbers(true);
     editor_.SetLanguage(sqleditor::TextEditor::Language::MongoShell);
@@ -679,7 +679,7 @@ void MongoEditorTab::startQueryExecutionAsync(const std::string& query) {
         return;
     }
 
-    MongoDBDatabaseNode* nodePtr = node_;
+    IDatabaseNode* nodePtr = node_;
     queryExecutionOp_.startCancellable([query, nodePtr](const std::stop_token& stopToken) {
         QueryResult result;
         if (stopToken.stop_requested())

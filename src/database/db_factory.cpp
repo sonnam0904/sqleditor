@@ -1,6 +1,7 @@
 #include "database/cassandra.hpp"
 #include "database/db_interface.hpp"
 #include "database/mongodb.hpp"
+#include "database/mongodb_old.hpp"
 #include "database/mssql.hpp"
 #include "database/mysql.hpp"
 #include "database/oracle.hpp"
@@ -21,6 +22,10 @@ std::string databaseTypeToString(const DatabaseType type) {
         return "redis";
     case DatabaseType::MONGODB:
         return "mongodb";
+    case DatabaseType::MONGODB_LEGACY:
+        return "mongodb_legacy";
+    case DatabaseType::MONGODB_OLD:
+        return "mongodb_old";
     case DatabaseType::MARIADB:
         return "mariadb";
     case DatabaseType::MSSQL:
@@ -46,6 +51,10 @@ DatabaseType stringToDatabaseType(const std::string& typeStr) {
         return DatabaseType::REDIS;
     if (typeStr == "mongodb")
         return DatabaseType::MONGODB;
+    if (typeStr == "mongodb_legacy")
+        return DatabaseType::MONGODB_LEGACY;
+    if (typeStr == "mongodb_old")
+        return DatabaseType::MONGODB_OLD;
     if (typeStr == "mariadb")
         return DatabaseType::MARIADB;
     if (typeStr == "mssql")
@@ -113,7 +122,11 @@ DatabaseFactory::createDatabase(const DatabaseConnectionInfo& info) {
         return std::make_shared<RedisDatabase>(info);
 
     case DatabaseType::MONGODB:
+    case DatabaseType::MONGODB_LEGACY:
         return std::make_shared<MongoDBDatabase>(info);
+
+    case DatabaseType::MONGODB_OLD:
+        return std::make_shared<MongoDBOldDatabase>(info);
 
     case DatabaseType::MARIADB:
         return std::make_shared<MySQLDatabase>(info);

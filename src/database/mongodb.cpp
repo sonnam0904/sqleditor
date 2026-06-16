@@ -42,6 +42,18 @@ namespace {
         return true;
     }
 
+    std::string friendlyMongoConnectError(const std::string& raw, bool legacy) {
+        if (raw.find("wire version") != std::string::npos &&
+            raw.find("requires at least") != std::string::npos) {
+            if (legacy) {
+                return "MongoDB Legacy requires server 4.2 or newer. MongoDB 3.x is not "
+                       "supported by the bundled driver (wire version 4 = MongoDB 3.2).";
+            }
+            return "MongoDB server is too old. This app requires MongoDB 4.2 or newer.";
+        }
+        return raw;
+    }
+
     std::string fetchMongoServerVersion(mongocxx::client& client, std::string_view preferredDb) {
         const auto tryBuildInfo = [&](const std::string& dbName) -> std::string {
             auto database = client[dbName];
@@ -326,7 +338,9 @@ std::pair<bool, std::string> MongoDBDatabase::connect() {
         connectionPool.reset();
         connected = false;
         clearServerVersion();
-        std::string error = "MongoDB connection failed: " + std::string(e.what());
+        const bool legacy = connectionInfo.type == DatabaseType::MONGODB_LEGACY;
+        std::string error =
+            "MongoDB connection failed: " + friendlyMongoConnectError(e.what(), legacy);
         setLastConnectionError(error);
         return {false, error};
     }

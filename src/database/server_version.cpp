@@ -2,6 +2,7 @@
 #include "database/cassandra.hpp"
 #include "database/db_interface.hpp"
 #include "database/mongodb.hpp"
+#include "database/mongodb_old.hpp"
 #include "database/mssql.hpp"
 #include "database/mysql.hpp"
 #include "database/oracle.hpp"
@@ -107,8 +108,14 @@ void fetchAndStoreServerVersion(DatabaseInterface& db) {
             }
             break;
         case DatabaseType::MONGODB:
+        case DatabaseType::MONGODB_LEGACY:
             if (auto* mongo = dynamic_cast<MongoDBDatabase*>(&db)) {
                 storeIfNonEmpty(db, mongo->readServerVersion());
+            }
+            break;
+        case DatabaseType::MONGODB_OLD:
+            if (auto* mongoOld = dynamic_cast<MongoDBOldDatabase*>(&db)) {
+                storeIfNonEmpty(db, mongoOld->readServerVersion());
             }
             break;
         case DatabaseType::REDIS:

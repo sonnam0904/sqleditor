@@ -8,7 +8,7 @@
 #include <memory>
 #include <string>
 
-class MongoDBDatabaseNode;
+#include "database/database_node.hpp"
 class AIChatState;
 class AIChatPanel;
 
@@ -16,18 +16,18 @@ enum class MongoResultViewMode { Table, Json };
 
 class MongoEditorTab final : public Tab {
 public:
-    explicit MongoEditorTab(const std::string& name, MongoDBDatabaseNode* node);
+    explicit MongoEditorTab(const std::string& name, IDatabaseNode* node);
     ~MongoEditorTab() override;
 
     void render() override;
 
-    [[nodiscard]] MongoDBDatabaseNode* getDatabaseNode() const {
+    [[nodiscard]] IDatabaseNode* getDatabaseNode() const {
         return node_;
     }
 
 private:
     std::string query_;
-    MongoDBDatabaseNode* node_ = nullptr;
+    IDatabaseNode* node_ = nullptr;
     sqleditor::TextEditor editor_;
 
     // query result

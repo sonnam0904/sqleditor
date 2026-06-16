@@ -15,11 +15,18 @@ enum class DatabaseType {
     MARIADB,
     REDIS,
     MONGODB,
+    MONGODB_LEGACY,
+    MONGODB_OLD,
     MSSQL,
     ORACLE,
     REDSHIFT,
     CASSANDRA
 };
+
+inline bool isMongoDbType(DatabaseType type) {
+    return type == DatabaseType::MONGODB || type == DatabaseType::MONGODB_LEGACY ||
+           type == DatabaseType::MONGODB_OLD;
+}
 
 enum class SSHAuthMethod { Password, PrivateKey };
 
@@ -111,9 +118,12 @@ struct DatabaseConnectionInfo {
         case DatabaseType::REDIS:
             return "redis://" + host + ":" + std::to_string(port);
 
-        case DatabaseType::MONGODB: {
+        case DatabaseType::MONGODB:
+        case DatabaseType::MONGODB_LEGACY:
+        case DatabaseType::MONGODB_OLD: {
             // mongodb://[user:pass@]host[:port][,host2:port2,...][/db][?replicaSet=...]
-            // mongocxx discovers the primary from the replica set automatically.
+            const bool legacyCompat = type == DatabaseType::MONGODB_LEGACY ||
+                                      type == DatabaseType::MONGODB_OLD;
             std::string connStr = "mongodb://";
             if (!username.empty()) {
                 connStr += username;
@@ -151,6 +161,14 @@ struct DatabaseConnectionInfo {
                     appendQuery("tlsCAFile=" + sslCACertPath);
                 } else if (sslmode == SslMode::Require) {
                     appendQuery("tlsAllowInvalidCertificates=true");
+                }
+            }
+
+            if (legacyCompat) {
+                appendQuery("retryWrites=false");
+                appendQuery("retryReads=false");
+                if (!username.empty() && query.find("authMechanism=") == std::string::npos) {
+                    appendQuery("authMechanism=SCRAM-SHA-1");
                 }
             }
 

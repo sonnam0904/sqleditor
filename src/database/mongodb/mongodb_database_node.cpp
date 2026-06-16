@@ -21,6 +21,13 @@ std::string MongoDBDatabaseNode::getFullPath() const {
     return name;
 }
 
+DatabaseType MongoDBDatabaseNode::getDatabaseType() const {
+    if (parentDb) {
+        return parentDb->getConnectionInfo().type;
+    }
+    return DatabaseType::MONGODB;
+}
+
 void MongoDBDatabaseNode::startTablesLoadAsync(bool force) {
     startCollectionsLoadAsync(force);
 }

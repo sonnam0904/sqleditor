@@ -6,6 +6,7 @@
 #include "database/connection_url.hpp"
 #include "database/db_interface.hpp"
 #include "database/mongodb.hpp"
+#include "database/mongodb_old.hpp"
 #include "database/mssql.hpp"
 #include "database/mysql.hpp"
 #include "database/oracle.hpp"
@@ -280,6 +281,8 @@ static int defaultPort(DatabaseType type) {
     case DatabaseType::MARIADB:
         return 3306;
     case DatabaseType::MONGODB:
+    case DatabaseType::MONGODB_LEGACY:
+    case DatabaseType::MONGODB_OLD:
         return 27017;
     case DatabaseType::REDIS:
         return 6379;
@@ -657,7 +660,7 @@ static void connectServerAsync(ConnectionDialogData* data) {
     }
 
     // validate
-    if (authEnabled && username.empty() && type != DatabaseType::MONGODB &&
+    if (authEnabled && username.empty() && !isMongoDbType(type) &&
         type != DatabaseType::REDIS) {
         setStatus(dialog, "Please enter a username");
         return;
@@ -719,8 +722,13 @@ static void connectServerAsync(ConnectionDialogData* data) {
             db = std::make_shared<MySQLDatabase>(info);
             break;
         case DatabaseType::MONGODB:
+        case DatabaseType::MONGODB_LEGACY:
             info.database = database;
             db = std::make_shared<MongoDBDatabase>(info);
+            break;
+        case DatabaseType::MONGODB_OLD:
+            info.database = database;
+            db = std::make_shared<MongoDBOldDatabase>(info);
             break;
         case DatabaseType::REDIS:
             db = std::make_shared<RedisDatabase>(info);
@@ -975,8 +983,10 @@ static LRESULT CALLBACK ConnectionDialogProc(HWND hwnd, UINT msg, WPARAM wParam,
         makeCtrl("STATIC", "Type:", IDC_LABEL_TYPE, SS_RIGHT, LX, y + 3, LW, RH);
         HWND typeCombo =
             makeCtrl("COMBOBOX", "", IDC_TYPE_COMBO, CBS_DROPDOWNLIST | WS_TABSTOP, FX, y, FW, 200);
-        const char* types[] = {"SQLite",  "PostgreSQL", "MySQL",  "MariaDB",  "Redis",
-                               "MongoDB", "MSSQL",      "Oracle", "Redshift", "Cassandra"};
+        const char* types[] = {"SQLite",       "PostgreSQL",    "MySQL",  "MariaDB",
+                               "Redis",        "MongoDB",       "MongoDB Legacy (4.2+)",
+                               "MongoDB Old (ver 3)", "MSSQL",  "Oracle",        "Redshift",
+                               "Cassandra"};
         for (const char* t : types) {
             SendMessageA(typeCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(t));
         }

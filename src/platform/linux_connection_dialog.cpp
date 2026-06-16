@@ -6,6 +6,7 @@
 #include "database/connection_url.hpp"
 #include "database/db_interface.hpp"
 #include "database/mongodb.hpp"
+#include "database/mongodb_old.hpp"
 #include "database/mssql.hpp"
 #include "database/mysql.hpp"
 #include "database/oracle.hpp"
@@ -172,7 +173,10 @@ static void clearBox(GtkWidget* box) {
 }
 
 static void updateTypeIcon(GtkWidget* image, DatabaseType type) {
-    const std::string name = databaseTypeToString(type);
+    std::string name = databaseTypeToString(type);
+    if (type == DatabaseType::MONGODB_LEGACY || type == DatabaseType::MONGODB_OLD) {
+        name = "mongodb";
+    }
     const EmbeddedImage* img = findEmbeddedImage(name.c_str());
     if (!img) {
         gtk_widget_set_visible(image, FALSE);
@@ -534,10 +538,10 @@ static void rebuildFieldsForType(ConnectionDialogData* data) {
 
     // Host + Port
     const char* hostPlaceholder =
-        type == DatabaseType::MONGODB ? "host:port,host2:port2" : "localhost";
+        isMongoDbType(type) ? "host:port,host2:port2" : "localhost";
     data->hostEntry = makeEntry(hostPlaceholder);
     gtk_editable_set_text(GTK_EDITABLE(data->hostEntry),
-                          type == DatabaseType::MONGODB ? "" : "localhost");
+                          isMongoDbType(type) ? "" : "localhost");
     data->portEntry = makeEntry("5432");
     gtk_widget_set_size_request(data->portEntry, 70, -1);
     gtk_widget_set_hexpand(data->portEntry, FALSE);
@@ -546,7 +550,7 @@ static void rebuildFieldsForType(ConnectionDialogData* data) {
     const char* defaultPort = "5432";
     if (type == DatabaseType::MYSQL || type == DatabaseType::MARIADB)
         defaultPort = "3306";
-    else if (type == DatabaseType::MONGODB)
+    else if (isMongoDbType(type))
         defaultPort = "27017";
     else if (type == DatabaseType::REDIS)
         defaultPort = "6379";
@@ -562,7 +566,7 @@ static void rebuildFieldsForType(ConnectionDialogData* data) {
 
     GtkWidget* hostRow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_box_append(GTK_BOX(hostRow),
-                   makeLabel(type == DatabaseType::MONGODB ? "Host(s)" : "Host"));
+                   makeLabel(isMongoDbType(type) ? "Host(s)" : "Host"));
     gtk_box_append(GTK_BOX(hostRow), data->hostEntry);
     GtkWidget* portLabel = gtk_label_new("Port");
     gtk_widget_add_css_class(portLabel, "dim-label");
@@ -580,8 +584,13 @@ static void rebuildFieldsForType(ConnectionDialogData* data) {
         gtk_box_append(GTK_BOX(data->fieldsBox), dbRow);
     }
 
-    if (type == DatabaseType::MONGODB) {
-        data->mongoOptionsEntry = makeEntry("replicaSet=myReplicaSet");
+    if (isMongoDbType(type)) {
+        const char* mongoOptsPlaceholder = type == DatabaseType::MONGODB_OLD
+                                               ? "authSource=admin (MongoDB 3.x)"
+                                               : type == DatabaseType::MONGODB_LEGACY
+                                                     ? "authSource=admin (MongoDB 4.2+ only)"
+                                                     : "replicaSet=myReplicaSet";
+        data->mongoOptionsEntry = makeEntry(mongoOptsPlaceholder);
         GtkWidget* mongoOptsRow =
             makeRow(makeLabel("URI Options"), data->mongoOptionsEntry);
         gtk_box_append(GTK_BOX(data->fieldsBox), mongoOptsRow);
@@ -673,7 +682,7 @@ static void rebuildFieldsForType(ConnectionDialogData* data) {
     }
 
     // Auth radio
-    bool defaultNoAuth = (type == DatabaseType::MONGODB || type == DatabaseType::REDIS);
+    bool defaultNoAuth = (isMongoDbType(type) || type == DatabaseType::REDIS);
     data->authPasswordRadio = gtk_check_button_new_with_label("Username & Password");
     data->authNoneRadio = gtk_check_button_new_with_label("None");
     gtk_check_button_set_group(GTK_CHECK_BUTTON(data->authNoneRadio),
@@ -1047,7 +1056,7 @@ static void connectServerAsync(ConnectionDialogData* data) {
     }
 
     // Validate
-    if (authEnabled && (!username || strlen(username) == 0) && type != DatabaseType::MONGODB &&
+    if (authEnabled && (!username || strlen(username) == 0) && !isMongoDbType(type) &&
         type != DatabaseType::REDIS) {
         gtk_label_set_text(GTK_LABEL(data->statusLabel), "Please enter a username");
         return;
@@ -1124,8 +1133,13 @@ static void connectServerAsync(ConnectionDialogData* data) {
             db = std::make_shared<MySQLDatabase>(info);
             break;
         case DatabaseType::MONGODB:
+        case DatabaseType::MONGODB_LEGACY:
             info.database = dbStr;
             db = std::make_shared<MongoDBDatabase>(info);
+            break;
+        case DatabaseType::MONGODB_OLD:
+            info.database = dbStr;
+            db = std::make_shared<MongoDBOldDatabase>(info);
             break;
         case DatabaseType::REDIS:
             db = std::make_shared<RedisDatabase>(info);
@@ -1229,9 +1243,11 @@ static GtkWidget* buildConnectionDialog(ConnectionDialogData* data,
     gtk_box_append(GTK_BOX(mainBox), nameRow);
 
     // Type dropdown
-    static const char* typeNames[] = {"SQLite",  "PostgreSQL", "MySQL",  "MariaDB",  "Redis",
-                                      "MongoDB", "MSSQL",      "Oracle", "Redshift", "Cassandra"};
-    data->typeDropdown = makeStringDropdown(typeNames, 10, static_cast<int>(initialType));
+    static const char* typeNames[] = {"SQLite",       "PostgreSQL",    "MySQL",  "MariaDB",
+                                      "Redis",        "MongoDB",       "MongoDB Legacy (4.2+)",
+                                      "MongoDB Old (ver 3)", "MSSQL",  "Oracle",        "Redshift",
+                                      "Cassandra"};
+    data->typeDropdown = makeStringDropdown(typeNames, 12, static_cast<int>(initialType));
 
     // type icon next to dropdown
     data->typeIcon = gtk_image_new();
@@ -1464,6 +1480,8 @@ static void populateFieldsFromConnection(ConnectionDialogData* data,
         break;
 
     case DatabaseType::MONGODB:
+    case DatabaseType::MONGODB_LEGACY:
+    case DatabaseType::MONGODB_OLD:
         if (data->hostEntry)
             gtk_editable_set_text(GTK_EDITABLE(data->hostEntry), info.host.c_str());
         if (data->portEntry) {

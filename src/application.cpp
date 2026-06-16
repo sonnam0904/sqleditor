@@ -3,6 +3,7 @@
 #include "database/async_helper.hpp"
 #include "database/cassandra.hpp"
 #include "database/mongodb.hpp"
+#include "database/mongodb_old.hpp"
 #include "database/mssql.hpp"
 #include "database/mysql.hpp"
 #include "database/oracle.hpp"
@@ -465,7 +466,9 @@ void Application::restorePreviousConnections() {
             db = std::make_shared<SQLiteDatabase>(conn.connectionInfo);
         } else if (conn.connectionInfo.type == DatabaseType::REDIS) {
             db = std::make_shared<RedisDatabase>(conn.connectionInfo);
-        } else if (conn.connectionInfo.type == DatabaseType::MONGODB) {
+        } else if (conn.connectionInfo.type == DatabaseType::MONGODB_OLD) {
+            db = std::make_shared<MongoDBOldDatabase>(conn.connectionInfo);
+        } else if (isMongoDbType(conn.connectionInfo.type)) {
             db = std::make_shared<MongoDBDatabase>(conn.connectionInfo);
         } else if (conn.connectionInfo.type == DatabaseType::MSSQL) {
             db = std::make_shared<MSSQLDatabase>(conn.connectionInfo);

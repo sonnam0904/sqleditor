@@ -12,6 +12,8 @@
 //   mysql://                        -> MYSQL
 //   mariadb://                      -> MARIADB
 //   mongodb:// | mongodb+srv://     -> MONGODB (supports replica-set seed lists)
+//   mongodb-legacy://               -> MONGODB_LEGACY (MongoDB 4.2–4.x compatibility; not 3.x)
+//   mongodb-old://                  -> MONGODB_OLD (MongoDB 3.x via bundled mongo-c-driver 1.x bridge)
 //   redis://                        -> REDIS
 //   rediss://                       -> REDIS with TLS (sslmode=require)
 //   mssql:// | sqlserver://         -> MSSQL

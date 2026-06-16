@@ -9,47 +9,32 @@
 #include <string>
 #include <vector>
 
-// Forward declaration
-class MongoDBDatabase;
+class MongoDBOldDatabase;
 
-/**
- * @brief Per-database data for MongoDB
- *
- * MongoDB hierarchy: Server -> Databases -> Collections
- * Each MongoDBDatabaseNode represents one database within the MongoDB server.
- * Collections are mapped to the "tables" concept for UI consistency.
- */
-class MongoDBDatabaseNode : public IDatabaseNode, public ITableDataProvider {
+class MongoDBOldDatabaseNode : public IDatabaseNode, public ITableDataProvider {
 public:
-    MongoDBDatabase* parentDb = nullptr;
+    MongoDBOldDatabase* parentDb = nullptr;
 
     std::string name;
 
     [[nodiscard]] DatabaseInterface* ownerDatabase() const override;
 
-    // MongoDB: Database -> Collections (mapped to tables for consistency)
-    std::vector<Table> collections; // Collections treated as "tables"
-    std::vector<Table> views;       // MongoDB views (if any)
+    std::vector<Table> collections;
+    std::vector<Table> views;
 
-    // Loading state flags
     bool collectionsLoaded = false;
     bool viewsLoaded = false;
 
-    // Async operations
     AsyncOperation<std::vector<Table>> collectionsLoader;
     AsyncOperation<std::vector<Table>> viewsLoader;
     std::map<std::string, AsyncOperation<Table>> collectionRefreshLoaders;
 
-    // Error tracking
     std::string lastCollectionsError;
     std::string lastViewsError;
 
-    // UI expansion state
     bool expanded = false;
     bool collectionsExpanded = false;
     bool viewsExpanded = false;
-
-    // ========== IDatabaseNode Implementation ==========
 
     [[nodiscard]] std::string getName() const override {
         return name;
@@ -78,22 +63,24 @@ public:
     std::vector<std::vector<std::string>> getTableData(const Table& collection, int limit,
                                                        int offset, const std::string& filter = "",
                                                        const std::string& sort = "") override;
-    std::vector<std::string> getCollectionDocumentsAsJson(const Table& collection, int limit,
-                                                          int offset,
-                                                          const std::string& filter = "",
-                                                          const std::string& sort = "");
-    std::vector<std::string> getColumnNames(const Table& collection) override;
-    int getRowCount(const Table& collection, const std::string& filter = "") override;
+
+    [[nodiscard]] std::vector<std::string> getColumnNames(const Table& table) override;
+
+    [[nodiscard]] int getRowCount(const Table& table,
+                                  const std::string& whereClause = "") override;
 
     [[nodiscard]] bool isTablesLoaded() const override {
         return collectionsLoaded;
     }
+
     [[nodiscard]] bool isViewsLoaded() const override {
         return viewsLoaded;
     }
+
     [[nodiscard]] bool isLoadingTables() const override {
         return collectionsLoader.isRunning();
     }
+
     [[nodiscard]] bool isLoadingViews() const override {
         return viewsLoader.isRunning();
     }
@@ -105,30 +92,21 @@ public:
     [[nodiscard]] const std::string& getLastTablesError() const override {
         return lastCollectionsError;
     }
-    [[nodiscard]] const std::string& getLastViewsError() const override {
-        return lastViewsError;
-    }
 
-    void startTableRefreshAsync(const std::string& collectionName) override;
-    [[nodiscard]] bool isTableRefreshing(const std::string& collectionName) const override;
-    void checkTableRefreshStatusAsync(const std::string& collectionName) override;
+    void startTableRefreshAsync(const std::string& tableName) override;
+    [[nodiscard]] bool isTableRefreshing(const std::string& tableName) const override;
+    void checkTableRefreshStatusAsync(const std::string& tableName) override;
 
-    // ========== MongoDB-specific Methods ==========
-
-    void startCollectionsLoadAsync(bool force = false);
-    void checkCollectionsStatusAsync();
-    std::vector<Table> getCollectionsAsync();
-
-    Table refreshCollectionAsync(const std::string& collectionName);
-
-    // Schema inference by sampling documents
-    std::vector<Column> inferSchemaFromSample(const std::string& collectionName,
-                                              int sampleSize = 100);
-
-    // Fetch indexes for a collection
-    std::vector<Index> getCollectionIndexes(const std::string& collectionName);
-
-    // ========== Schema Modification ==========
+    std::vector<std::string> getCollectionDocumentsAsJson(const Table& collection, int limit,
+                                                          int offset, const std::string& filter,
+                                                          const std::string& sort);
 
     std::pair<bool, std::string> dropCollection(const std::string& collectionName);
+
+private:
+    void startCollectionsLoadAsync(bool force);
+    void checkCollectionsStatusAsync();
+    std::vector<Table> getCollectionsAsync();
+    std::vector<Column> inferSchemaFromSample(const std::string& collectionName, int sampleSize);
+    Table refreshCollectionAsync(const std::string& collectionName);
 };

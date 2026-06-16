@@ -26,7 +26,10 @@ void TextureManager::loadDatabaseIcons(PlatformInterface* platform) {
     static constexpr IconMapping mappings[] = {
         {DatabaseType::SQLITE, "sqlite"},     {DatabaseType::POSTGRESQL, "postgresql"},
         {DatabaseType::MYSQL, "mysql"},       {DatabaseType::MARIADB, "mariadb"},
-        {DatabaseType::MONGODB, "mongodb"},   {DatabaseType::REDIS, "redis"},
+        {DatabaseType::MONGODB, "mongodb"},
+        {DatabaseType::MONGODB_LEGACY, "mongodb"},
+        {DatabaseType::MONGODB_OLD, "mongodb"},
+        {DatabaseType::REDIS, "redis"},
         {DatabaseType::MSSQL, "mssql"},       {DatabaseType::ORACLE, "oracle"},
         {DatabaseType::REDSHIFT, "redshift"}, {DatabaseType::CASSANDRA, "cassandra"},
     };
