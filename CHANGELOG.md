@@ -1,3 +1,9 @@
+## [1.2.0](https://github.com/sonnam0904/sqleditor/compare/v1.1.0...v1.2.0) (2026-06-16)
+
+### Features
+
+* add MongoDB legacy and old support ([44a2f86](https://github.com/sonnam0904/sqleditor/commit/44a2f867ba0b805d45e818e9ae0f3f16352d51d0))
+
 ## [1.1.0](https://github.com/sonnam0904/sqleditor/compare/v1.0.3...v1.1.0) (2026-06-15)
 
 ### Features
