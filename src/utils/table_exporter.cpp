@@ -28,7 +28,8 @@ namespace {
         return escaped;
     }
 
-    bool exportCsv(ITableDataProvider* provider, const Table& table, const std::string& path) {
+    bool exportCsv(ITableDataProvider* provider, const Table& table, const std::string& path,
+                   const TableExporter::TableExportOptions& options) {
         std::ofstream file(path);
         if (!file.is_open()) {
             spdlog::error("Failed to open file for writing: {}", path);
@@ -41,7 +42,6 @@ namespace {
             return false;
         }
 
-        // header
         for (size_t i = 0; i < columns.size(); ++i) {
             if (i > 0)
                 file << ',';
@@ -49,10 +49,10 @@ namespace {
         }
         file << '\n';
 
-        // rows in batches
-        int totalRows = provider->getRowCount(table);
+        const int totalRows = provider->getRowCount(table, options.whereClause);
         for (int offset = 0; offset < totalRows; offset += BATCH_SIZE) {
-            auto rows = provider->getTableData(table, BATCH_SIZE, offset);
+            auto rows = provider->getTableData(table, BATCH_SIZE, offset, options.whereClause,
+                                               options.orderByClause);
             for (const auto& row : rows) {
                 for (size_t i = 0; i < columns.size() && i < row.size(); ++i) {
                     if (i > 0)
@@ -72,7 +72,8 @@ namespace {
         return true;
     }
 
-    bool exportJson(ITableDataProvider* provider, const Table& table, const std::string& path) {
+    bool exportFlatJson(ITableDataProvider* provider, const Table& table, const std::string& path,
+                        const TableExporter::TableExportOptions& options) {
         std::ofstream file(path);
         if (!file.is_open()) {
             spdlog::error("Failed to open file for writing: {}", path);
@@ -84,12 +85,13 @@ namespace {
             spdlog::error("Cannot export: table has no columns");
             return false;
         }
-        int totalRows = provider->getRowCount(table);
+        const int totalRows = provider->getRowCount(table, options.whereClause);
 
         file << "[\n";
         bool firstRow = true;
         for (int offset = 0; offset < totalRows; offset += BATCH_SIZE) {
-            auto rows = provider->getTableData(table, BATCH_SIZE, offset);
+            auto rows = provider->getTableData(table, BATCH_SIZE, offset, options.whereClause,
+                                               options.orderByClause);
             for (const auto& row : rows) {
                 if (!firstRow) {
                     file << ",\n";
@@ -115,6 +117,46 @@ namespace {
         return true;
     }
 
+    bool exportMongoJson(const TableExporter::TableExportOptions& options, const std::string& path,
+                         int totalRows) {
+        if (!options.fetchJsonDocuments) {
+            spdlog::error("Cannot export MongoDB JSON: missing document fetcher");
+            return false;
+        }
+
+        std::ofstream file(path);
+        if (!file.is_open()) {
+            spdlog::error("Failed to open file for writing: {}", path);
+            return false;
+        }
+
+        file << "[\n";
+        bool firstRow = true;
+        for (int offset = 0; offset < totalRows; offset += BATCH_SIZE) {
+            const auto docs = options.fetchJsonDocuments(BATCH_SIZE, offset);
+            for (const auto& doc : docs) {
+                if (!firstRow) {
+                    file << ",\n";
+                }
+                firstRow = false;
+                file << "  " << doc;
+            }
+        }
+        file << "\n]\n";
+
+        spdlog::info("Exported {} MongoDB documents to JSON: {}", totalRows, path);
+        return true;
+    }
+
+    bool exportJson(ITableDataProvider* provider, const Table& table, const std::string& path,
+                    const TableExporter::TableExportOptions& options) {
+        if (options.fetchJsonDocuments) {
+            const int totalRows = provider->getRowCount(table, options.whereClause);
+            return exportMongoJson(options, path, totalRows);
+        }
+        return exportFlatJson(provider, table, path, options);
+    }
+
     std::string quoteSqlValue(const std::string& value) {
         if (isNullSentinel(value))
             return "NULL";
@@ -124,21 +166,25 @@ namespace {
     }
 
     void writeSqlTable(std::ofstream& file, ITableDataProvider* provider, const Table& table,
-                       const ISQLBuilder& builder) {
+                       const ISQLBuilder& builder,
+                       const TableExporter::TableExportOptions& options) {
         auto columns = provider->getColumnNames(table);
         if (columns.empty()) {
             spdlog::error("Cannot export: table '{}' has no columns", table.name);
             return;
         }
 
-        if (!table.columns.empty())
+        const bool filtered = !options.whereClause.empty();
+        if (!filtered && !table.columns.empty()) {
             file << builder.createTable(table) << ";\n\n";
+        }
 
         auto quotedName = builder.quoteIdentifier(table.name);
 
-        int totalRows = provider->getRowCount(table);
+        const int totalRows = provider->getRowCount(table, options.whereClause);
         for (int offset = 0; offset < totalRows; offset += BATCH_SIZE) {
-            auto rows = provider->getTableData(table, BATCH_SIZE, offset);
+            auto rows = provider->getTableData(table, BATCH_SIZE, offset, options.whereClause,
+                                               options.orderByClause);
             for (const auto& row : rows) {
                 std::vector<std::string> valueLiterals;
                 valueLiterals.reserve(columns.size());
@@ -153,7 +199,7 @@ namespace {
     }
 
     bool exportSql(ITableDataProvider* provider, const Table& table, const std::string& path,
-                   DatabaseType dbType) {
+                   DatabaseType dbType, const TableExporter::TableExportOptions& options) {
         std::ofstream file(path);
         if (!file.is_open()) {
             spdlog::error("Failed to open file for writing: {}", path);
@@ -161,7 +207,7 @@ namespace {
         }
 
         auto builder = createSQLBuilder(dbType);
-        writeSqlTable(file, provider, table, *builder);
+        writeSqlTable(file, provider, table, *builder, options);
         return true;
     }
 
@@ -174,10 +220,11 @@ namespace {
         }
 
         auto builder = createSQLBuilder(dbType);
+        TableExporter::TableExportOptions options;
         for (size_t i = 0; i < tables.size(); ++i) {
             if (i > 0)
                 file << "\n";
-            writeSqlTable(file, provider, *tables[i], *builder);
+            writeSqlTable(file, provider, *tables[i], *builder, options);
         }
 
         spdlog::info("Exported {} tables to SQL: {}", tables.size(), path);
@@ -193,7 +240,6 @@ namespace {
 
     std::string showFolderDialog() {
         nfdchar_t* outPath = nullptr;
-        // use save dialog so the user can type a folder name
         const nfdresult_t result = NFD_SaveDialog(&outPath, nullptr, 0, nullptr, "data");
         if (result == NFD_OKAY) {
             std::string path(outPath);
@@ -240,9 +286,34 @@ namespace {
         return "";
     }
 
+    bool exportSingleTable(ITableDataProvider* provider, const Table& table, ExportFormat format,
+                           DatabaseType dbType, const TableExporter::TableExportOptions& options) {
+        const std::string path = showSaveDialog(format, table.name);
+        if (path.empty()) {
+            return false;
+        }
+        switch (format) {
+        case ExportFormat::CSV:
+            return exportCsv(provider, table, path, options);
+        case ExportFormat::JSON:
+            return exportJson(provider, table, path, options);
+        case ExportFormat::SQL:
+            return exportSql(provider, table, path, dbType, options);
+        }
+        return false;
+    }
+
 } // namespace
 
 namespace TableExporter {
+
+    bool exportTable(ITableDataProvider* provider, const Table& table, ExportFormat format,
+                     DatabaseType dbType, const TableExportOptions& options) {
+        if (!provider) {
+            return false;
+        }
+        return exportSingleTable(provider, table, format, dbType, options);
+    }
 
     bool exportTables(ITableDataProvider* provider, const std::vector<const Table*>& tables,
                       ExportFormat format, DatabaseType dbType) {
@@ -263,7 +334,8 @@ namespace TableExporter {
             break;
         }
 
-        // SQL multi-table: single file
+        TableExportOptions options;
+
         if (format == ExportFormat::SQL && tables.size() > 1) {
             const std::string path = showSaveDialog(format, "export");
             if (path.empty())
@@ -272,19 +344,7 @@ namespace TableExporter {
         }
 
         if (tables.size() == 1) {
-            const std::string path = showSaveDialog(format, tables[0]->name);
-            if (path.empty()) {
-                return false;
-            }
-            switch (format) {
-            case ExportFormat::CSV:
-                return exportCsv(provider, *tables[0], path);
-            case ExportFormat::JSON:
-                return exportJson(provider, *tables[0], path);
-            case ExportFormat::SQL:
-                return exportSql(provider, *tables[0], path, dbType);
-            }
-            return false;
+            return exportSingleTable(provider, *tables[0], format, dbType, options);
         }
 
         const std::string folder = showFolderDialog();
@@ -306,10 +366,10 @@ namespace TableExporter {
             bool ok = false;
             switch (format) {
             case ExportFormat::CSV:
-                ok = exportCsv(provider, *table, path);
+                ok = exportCsv(provider, *table, path, options);
                 break;
             case ExportFormat::JSON:
-                ok = exportJson(provider, *table, path);
+                ok = exportJson(provider, *table, path, options);
                 break;
             default:
                 break;

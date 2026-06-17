@@ -7,9 +7,14 @@
 #include <bsoncxx/json.hpp>
 #include <bsoncxx/oid.hpp>
 #include <bsoncxx/types.hpp>
+#include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
 #include <optional>
 #include <spdlog/spdlog.h>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -126,6 +131,95 @@ namespace {
         return true;
     }
 
+    std::time_t utcTimeFromTm(std::tm tm) {
+#ifdef _WIN32
+        return _mkgmtime(&tm);
+#else
+        return timegm(&tm);
+#endif
+    }
+
+    std::optional<std::chrono::milliseconds> parseMongoShellDateString(std::string raw) {
+        raw = trim(raw);
+        if (raw.empty()) {
+            return std::nullopt;
+        }
+
+        std::replace(raw.begin(), raw.end(), ' ', 'T');
+        if (!raw.empty() && raw.back() == 'Z') {
+            raw.pop_back();
+        }
+
+        int millis = 0;
+        if (const auto dot = raw.find('.'); dot != std::string::npos) {
+            const std::string frac = raw.substr(dot + 1);
+            raw.resize(dot);
+            if (!frac.empty()) {
+                try {
+                    std::string padded = frac;
+                    while (padded.size() < 3) {
+                        padded.push_back('0');
+                    }
+                    if (padded.size() > 3) {
+                        padded.resize(3);
+                    }
+                    millis = std::stoi(padded);
+                } catch (...) {
+                    return std::nullopt;
+                }
+            }
+        }
+
+        std::tm tm{};
+        std::istringstream ss(raw);
+        ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+        if (ss.fail()) {
+            return std::nullopt;
+        }
+
+        const auto seconds = utcTimeFromTm(tm);
+        if (seconds < 0) {
+            return std::nullopt;
+        }
+        return std::chrono::milliseconds{seconds * 1000LL + millis};
+    }
+
+    std::optional<std::string> readAlphaToken(std::string_view s, size_t& i) {
+        skipWs(s, i);
+        const size_t start = i;
+        while (i < s.size() && std::isalpha(static_cast<unsigned char>(s[i]))) {
+            ++i;
+        }
+        if (start == i) {
+            return std::nullopt;
+        }
+        return std::string(s.substr(start, i - start));
+    }
+
+    bool readParenQuotedArg(std::string_view s, size_t& i, std::string& out) {
+        skipWs(s, i);
+        if (i >= s.size() || s[i] != '(') {
+            return false;
+        }
+        ++i;
+        skipWs(s, i);
+        if (i >= s.size()) {
+            return false;
+        }
+        const char quote = s[i];
+        if (quote != '"' && quote != '\'') {
+            return false;
+        }
+        ++i;
+        out = readQuotedString(s, i, quote);
+        skipWs(s, i);
+        if (i >= s.size() || s[i] != ')') {
+            return false;
+        }
+        ++i;
+        return true;
+    }
+
     std::optional<std::string> elementAsString(const bsoncxx::document::element& elem) {
         switch (elem.type()) {
         case bsoncxx::type::k_string:
@@ -174,6 +268,12 @@ namespace {
         case bsoncxx::type::k_bool:
             ctx << elem.get_bool().value;
             break;
+        case bsoncxx::type::k_date:
+            ctx << bsoncxx::types::b_date{elem.get_date().value};
+            break;
+        case bsoncxx::type::k_oid:
+            ctx << elem.get_oid().value;
+            break;
         case bsoncxx::type::k_null:
             ctx << bsoncxx::types::b_null{};
             break;
@@ -187,6 +287,29 @@ namespace {
         skipWs(s, i);
         if (i >= s.size()) {
             return std::nullopt;
+        }
+
+        const size_t saved = i;
+        if (const auto fn = readAlphaToken(s, i)) {
+            if (iequals(*fn, "ISODate")) {
+                std::string arg;
+                if (readParenQuotedArg(s, i, arg)) {
+                    if (const auto millis = parseMongoShellDateString(arg)) {
+                        document d;
+                        d << "v" << bsoncxx::types::b_date{*millis};
+                        return d << finalize;
+                    }
+                    return std::nullopt;
+                }
+            } else if (iequals(*fn, "ObjectId")) {
+                std::string arg;
+                if (readParenQuotedArg(s, i, arg) && isObjectIdHex(arg)) {
+                    document d;
+                    d << "v" << bsoncxx::oid{arg};
+                    return d << finalize;
+                }
+            }
+            i = saved;
         }
 
         if (s[i] == '\'') {
@@ -391,6 +514,18 @@ namespace {
         const auto valueElem = valueDoc->view()["v"];
         document d;
         if (op == "=") {
+            if (valueElem.type() == bsoncxx::type::k_date) {
+                const auto millis = valueElem.get_date().value.count();
+                // UI shows dates to second precision; match the whole second when no ms given.
+                if (millis % 1000 == 0) {
+                    const auto start =
+                        bsoncxx::types::b_date{std::chrono::milliseconds{millis}};
+                    const auto end =
+                        bsoncxx::types::b_date{std::chrono::milliseconds{millis + 1000}};
+                    d << field << open_document << "$gte" << start << "$lt" << end << close_document;
+                    return d << finalize;
+                }
+            }
             appendFilterValue(d << field, field, valueElem);
         } else if (op == "!=" || op == "<>") {
             appendFilterValue(d << field << open_document << "$ne", field, valueElem);

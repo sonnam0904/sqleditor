@@ -7,6 +7,7 @@
 #include "ui/table_renderer.hpp"
 #include "ui/text_editor.hpp"
 #include "themes.hpp"
+#include "utils/table_exporter.hpp"
 #include <memory>
 #include <string>
 #include <vector>
@@ -126,6 +127,8 @@ private:
     void selectCell(int row, int col);
     void applyFilter();
     void initializeFilterAutoComplete();
+    void exportFilteredData(ExportFormat format);
+    [[nodiscard]] std::string buildOrderByClause() const;
     [[nodiscard]] std::string buildTableRef() const;
     [[nodiscard]] std::string buildRowWhere(const std::vector<std::string>& rowValues) const;
     [[nodiscard]] bool hasPendingChanges() const;

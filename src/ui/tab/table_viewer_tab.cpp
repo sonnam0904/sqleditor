@@ -4,6 +4,7 @@
 #include "application.hpp"
 #include "database/database_node.hpp"
 #include "database/ddl_utils.hpp"
+#include "database/table_data_provider.hpp"
 #include "database/mongodb/mongo_bson_format.hpp"
 #include "database/mongodb/mongo_filter.hpp"
 #include "database/mongodb/mongo_shell.hpp"
@@ -16,6 +17,7 @@
 #include "ui/ui_widgets.hpp"
 #include "ui/query_history.hpp"
 #include "utils/spinner.hpp"
+#include "utils/table_exporter.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -41,12 +43,13 @@ namespace {
             lower.pop_back();
 
         static constexpr std::string_view numeric[] = {
-            "int",     "integer",    "smallint",    "bigint",
-            "tinyint", "mediumint",  "varint",      "int2",
-            "int4",    "int8",       "numeric",     "decimal",
-            "real",    "float",      "double",      "double precision",
-            "money",   "smallmoney", "counter",     "number",
-            "serial",  "bigserial",  "smallserial",
+            "int",        "integer",    "smallint",    "bigint",      "tinyint",
+            "mediumint",  "varint",     "int2",        "int4",        "int8",
+            "int16",      "int32",      "int64",       "uint16",      "uint32",
+            "uint64",     "numeric",    "decimal",     "decimal128",  "real",
+            "float",      "float32",    "float64",     "double",      "double precision",
+            "money",      "smallmoney", "counter",     "number",
+            "serial",     "bigserial",  "smallserial",
         };
         for (auto t : numeric) {
             if (lower == t)
@@ -416,6 +419,33 @@ void TableViewerTab::renderToolbar(const Theme::Colors& colors) {
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Refresh");
     }
+
+    const bool canExport = !dataLoadOp.isRunning() && !filterParseError;
+    ImGui::SameLine();
+    ImGui::PushID("export");
+    if (UIWidgets::iconToolButton("btn", ICON_FA_FILE_ARROW_DOWN, colors.teal, canExport)) {
+        ImGui::OpenPopup("TableExportPopup");
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (!currentFilter.empty()) {
+            ImGui::SetTooltip("Export filtered data");
+        } else {
+            ImGui::SetTooltip("Export");
+        }
+    }
+    if (ImGui::BeginPopup("TableExportPopup")) {
+        if (ImGui::MenuItem("CSV")) {
+            exportFilteredData(ExportFormat::CSV);
+        }
+        if (ImGui::MenuItem("JSON")) {
+            exportFilteredData(ExportFormat::JSON);
+        }
+        if (!mongo && ImGui::MenuItem("SQL")) {
+            exportFilteredData(ExportFormat::SQL);
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
 
     ImGui::SameLine();
     if (UIWidgets::iconToolButton("save", ICON_FA_FLOPPY_DISK, colors.green, hasChanges)) {
@@ -833,12 +863,7 @@ void TableViewerTab::loadDataAsync() {
     }
 
     // Build ORDER BY clause from sort state
-    std::string orderByClause;
-    if (sortColumn >= 0 && sortDirection != SortDirection::None && !sortColumnName.empty()) {
-        const auto builder = createSQLBuilder(node_->getDatabaseType());
-        orderByClause = std::format("{} {}", builder->quoteIdentifier(sortColumnName),
-                                    sortDirection == SortDirection::Ascending ? "ASC" : "DESC");
-    }
+    const std::string orderByClause = buildOrderByClause();
 
     dataLoadOp.start([this, orderByClause]() -> bool {
         try {
@@ -1290,6 +1315,45 @@ void TableViewerTab::checkSQLExecutionStatus() {
     });
 }
 
+std::string TableViewerTab::buildOrderByClause() const {
+    if (sortColumn < 0 || sortDirection == SortDirection::None || sortColumnName.empty()) {
+        return {};
+    }
+    const auto builder = createSQLBuilder(node_->getDatabaseType());
+    return std::format("{} {}", builder->quoteIdentifier(sortColumnName),
+                       sortDirection == SortDirection::Ascending ? "ASC" : "DESC");
+}
+
+void TableViewerTab::exportFilteredData(const ExportFormat format) {
+    auto* provider = dynamic_cast<ITableDataProvider*>(node_);
+    if (!provider) {
+        spdlog::warn("Cannot export: node does not provide table data");
+        return;
+    }
+
+    TableExporter::TableExportOptions options;
+    options.whereClause = currentFilter;
+    options.orderByClause = buildOrderByClause();
+
+    if (isMongoCollection() && format == ExportFormat::JSON) {
+        const std::string filter = currentFilter;
+        const std::string orderBy = options.orderByClause;
+        options.fetchJsonDocuments = [this, filter, orderBy](const int limit, const int offset) {
+            if (auto* mongoNode = dynamic_cast<MongoDBDatabaseNode*>(node_)) {
+                return mongoNode->getCollectionDocumentsAsJson(table_, limit, offset, filter,
+                                                                 orderBy);
+            }
+            if (auto* mongoOldNode = dynamic_cast<MongoDBOldDatabaseNode*>(node_)) {
+                return mongoOldNode->getCollectionDocumentsAsJson(table_, limit, offset, filter,
+                                                                  orderBy);
+            }
+            return std::vector<std::string>{};
+        };
+    }
+
+    TableExporter::exportTable(provider, table_, format, node_->getDatabaseType(), options);
+}
+
 void TableViewerTab::applyFilter() {
     std::string newFilter = std::string(filterBuffer);
 
@@ -1412,8 +1476,11 @@ void TableViewerTab::initializeTableRenderer() {
         if (isNullSentinel(value)) {
             predicate = std::format("{} IS NULL", quotedCol);
         } else {
-            predicate =
-                std::format("{} = {}", quotedCol, formatSqlLiteral(table_.columns[col], value));
+            const std::string literal =
+                isMongoCollection()
+                    ? formatMongoShellValue(table_.columns[col], value)
+                    : formatSqlLiteral(table_.columns[col], value);
+            predicate = std::format("{} = {}", quotedCol, literal);
         }
 
         const std::string nextFilter = currentFilter.empty()

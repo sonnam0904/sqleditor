@@ -12,6 +12,7 @@
 //       status IS NULL
 //       name LIKE 'john%'
 //       _id = 611f7411e57e548b0b146c66
+//       created_at = ISODate("2024-04-15T05:11:03Z")
 bsoncxx::document::value parseMongoFilter(const std::string& filter);
 
 // Returns false when a non-empty filter string cannot be converted to BSON.
