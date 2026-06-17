@@ -562,6 +562,35 @@ int64_t MongoLegacyClient::count(const std::string& db, const std::string& colle
     return -1;
 }
 
+int64_t MongoLegacyClient::estimatedDocumentCount(const std::string& db,
+                                                  const std::string& collection,
+                                                  std::string& error) {
+    std::lock_guard lock(mutex_);
+    nlohmann::json req;
+    req["id"] = nextId_++;
+    req["op"] = "estimated_count";
+    req["db"] = db;
+    req["collection"] = collection;
+
+    const auto resp = sendRequest(req.dump(), error);
+    if (!error.empty() || !resp.ok) {
+        if (error.empty()) {
+            error = resp.error;
+        }
+        return -1;
+    }
+
+    try {
+        const auto json = nlohmann::json::parse(resp.rawJson);
+        if (json.contains("count") && json["count"].is_number_integer()) {
+            return json["count"].get<int64_t>();
+        }
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
+    return -1;
+}
+
 MongoLegacyClient::FindResult MongoLegacyClient::aggregate(const std::string& db,
                                                            const std::string& collection,
                                                            const std::string& pipelineJson,

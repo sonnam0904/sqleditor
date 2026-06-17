@@ -46,6 +46,9 @@ public:
     int64_t count(const std::string& db, const std::string& collection,
                   const std::string& filterJson, std::string& error);
 
+    int64_t estimatedDocumentCount(const std::string& db, const std::string& collection,
+                                   std::string& error);
+
     std::string runCommandJson(const std::string& db, const std::string& commandJson,
                                std::string& error);
 

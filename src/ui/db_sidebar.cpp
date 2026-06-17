@@ -118,7 +118,7 @@ void DatabaseSidebarNew::syncHierarchyCache(
     });
 }
 
-void DatabaseSidebarNew::renderStructure() {
+void DatabaseSidebarNew::renderTableSearchBar() {
     auto& app = Application::getInstance();
     const auto& colors = app.getCurrentColors();
 
@@ -134,6 +134,10 @@ void DatabaseSidebarNew::renderStructure() {
     }
     ImGui::PopStyleVar();
     ImGui::Spacing();
+}
+
+void DatabaseSidebarNew::renderStructure() {
+    auto& app = Application::getInstance();
 
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 5.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 2.0f));
@@ -373,16 +377,18 @@ void DatabaseSidebarNew::render() {
 
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 8.0f);
 
-    const float availableHeight = ImGui::GetContentRegionAvail().y;
     // extend past parent's right WindowPadding so scrollbar sits flush on the right
     const float sidebarWidth = ImGui::GetContentRegionAvail().x + Theme::Spacing::M;
     constexpr float historyHeight = 300.0f;
     constexpr float stripWidth = 22.0f;
     const float historyButtonH = getHistoryButtonHeight();
 
+    renderTableSearchBar();
+
+    const float remainingHeight = ImGui::GetContentRegionAvail().y;
     const float structureSectionHeight =
-        historyPanelOpen ? availableHeight - historyHeight - ImGui::GetStyle().ItemSpacing.y
-                         : availableHeight - historyButtonH;
+        historyPanelOpen ? remainingHeight - historyHeight - ImGui::GetStyle().ItemSpacing.y
+                         : remainingHeight - historyButtonH;
 
     {
         const bool structureHovered = ImGui::IsMouseHoveringRect(

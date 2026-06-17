@@ -14,6 +14,7 @@ add_executable(
     tests/database/sql_builder_test.cpp
     tests/database/connection_url_test.cpp
     tests/database/mongo_filter_test.cpp
+    tests/database/mongo_shell_test.cpp
     src/database/db_factory.cpp
     src/database/connection_url.cpp
     src/database/sqlite.cpp

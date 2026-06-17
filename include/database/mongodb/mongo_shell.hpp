@@ -4,16 +4,19 @@
 #include <string>
 #include <vector>
 
+inline constexpr int kDefaultMongoFindLimit = 100;
+
 struct MongoShellCommand {
     std::string collection;
     std::string method;
     std::vector<std::string> args;
+    std::string sort;
     int limit = -1;
     int skip = -1;
 };
 
 // Parse mongosh-style queries such as:
-//   db.users.find({ status: "active" }).limit(100)
+//   db.users.find({ status: "active" }).sort({ created_at: -1 }).limit(100)
 //   db.users.aggregate([{ $match: {} }])
 // Returns nullopt when the input is not shell syntax (caller may try legacy JSON).
 std::optional<MongoShellCommand> tryParseMongoShell(const std::string& query);

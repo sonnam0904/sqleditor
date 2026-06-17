@@ -388,12 +388,38 @@ void TableViewerTab::renderToolbar(const Theme::Colors& colors) {
     ImGui::Text("%s  %s", mongo ? ICON_FK_TABLE : ICON_FK_TABLE, table_.name.c_str());
     ImGui::PopStyleColor();
 
-    const std::string rowBadge = std::format("{} rows", totalRows);
-    const ImVec2 badgeTextSize = ImGui::CalcTextSize(rowBadge.c_str());
-    const float badgeWidth = badgeTextSize.x + 16.0f;
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - badgeWidth + ImGui::GetStyle().ItemSpacing.x);
-    UIWidgets::statusBadge(rowBadge.c_str(),
-                           ImVec4(colors.blue.x, colors.blue.y, colors.blue.z, 0.18f), colors.blue);
+    const std::string rowBadge =
+        mongo && mongoTotalRowsKnown ? std::format("~{} rows", totalRows)
+        : mongo                      ? std::string{}
+                                     : std::format("{} rows", totalRows);
+    if (!mongo || mongoTotalRowsKnown) {
+        const ImVec2 badgeTextSize = ImGui::CalcTextSize(rowBadge.c_str());
+        const float badgeWidth = badgeTextSize.x + 16.0f;
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - badgeWidth +
+                        ImGui::GetStyle().ItemSpacing.x);
+        UIWidgets::statusBadge(rowBadge.c_str(),
+                               ImVec4(colors.blue.x, colors.blue.y, colors.blue.z, 0.18f),
+                               colors.blue);
+    } else {
+        const char* countLabel = mongoCountOp.isRunning() ? "Counting..." : "Count total";
+        const ImVec2 labelSize = ImGui::CalcTextSize(countLabel);
+        const float buttonWidth = labelSize.x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - buttonWidth +
+                        ImGui::GetStyle().ItemSpacing.x);
+        const bool canCount = !mongoCountOp.isRunning() && !dataLoadOp.isRunning();
+        if (!canCount) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button(countLabel)) {
+            startMongoTotalCount();
+        }
+        if (!canCount) {
+            ImGui::EndDisabled();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Estimate total documents via collection metadata (fast)");
+        }
+    }
 
     ImGui::Dummy(ImVec2(0, Theme::Spacing::S));
 
@@ -518,13 +544,13 @@ void TableViewerTab::renderToolbar(const Theme::Colors& colors) {
         if (filterParseError) {
             ImGui::TextColored(colors.red, ICON_FA_TRIANGLE_EXCLAMATION " Invalid filter: %s",
                                currentFilter.c_str());
-            ImGui::SameLine();
-            ImGui::TextColored(colors.subtext0, "(ignored — showing all %d rows)", totalRows);
+            if (mongoTotalRowsKnown) {
+                ImGui::SameLine();
+                ImGui::TextColored(colors.subtext0, "(ignored — showing all ~%d rows)", totalRows);
+            }
         } else {
             ImGui::TextColored(colors.green, ICON_FA_FILTER " Active filter: %s",
                                currentFilter.c_str());
-            ImGui::SameLine();
-            ImGui::TextColored(colors.subtext0, "(%d rows)", totalRows);
         }
     }
 
@@ -542,7 +568,9 @@ void TableViewerTab::renderPaginationBar(const Theme::Colors& colors) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
     ImGui::BeginChild("TablePagination", ImVec2(-1, 0), ImGuiChildFlags_AutoResizeY);
 
-    const int totalPages = std::max(1, (totalRows + rowsPerPage - 1) / rowsPerPage);
+    const bool mongoUnknownTotal = isMongoCollection() && !mongoTotalRowsKnown;
+    const int totalPages =
+        mongoUnknownTotal ? 0 : std::max(1, (totalRows + rowsPerPage - 1) / rowsPerPage);
 
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.0f);
     if (ImGui::Button(ICON_FA_ANGLES_LEFT) && currentPage > 0) {
@@ -562,25 +590,45 @@ void TableViewerTab::renderPaginationBar(const Theme::Colors& colors) {
 
     ImGui::SameLine(0, Theme::Spacing::M);
     ImGui::AlignTextToFramePadding();
-    ImGui::Text("Page %d of %d", currentPage + 1, totalPages);
-    ImGui::SameLine(0, Theme::Spacing::S);
-    ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
-    ImGui::Text("(%d rows)", totalRows);
-    ImGui::PopStyleColor();
+    if (mongoUnknownTotal) {
+        ImGui::Text("Page %d", currentPage + 1);
+    } else {
+        ImGui::Text("Page %d of %d", currentPage + 1, totalPages);
+        ImGui::SameLine(0, Theme::Spacing::S);
+        ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+        if (isMongoCollection()) {
+            ImGui::Text("(~%d rows)", totalRows);
+        } else {
+            ImGui::Text("(%d rows)", totalRows);
+        }
+        ImGui::PopStyleColor();
+    }
 
     ImGui::SameLine(0, Theme::Spacing::M);
-    if (ImGui::Button(ICON_FA_ANGLE_RIGHT) && currentPage < totalPages - 1) {
+    if (!canGoToNextPage()) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button(ICON_FA_ANGLE_RIGHT) && canGoToNextPage()) {
         nextPage();
     }
-    if (ImGui::IsItemHovered()) {
+    if (!canGoToNextPage()) {
+        ImGui::EndDisabled();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("Next page");
     }
 
     ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_ANGLES_RIGHT) && currentPage < totalPages - 1) {
+    if (!canGoToLastPage()) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button(ICON_FA_ANGLES_RIGHT) && canGoToLastPage()) {
         lastPage();
     }
-    if (ImGui::IsItemHovered()) {
+    if (!canGoToLastPage()) {
+        ImGui::EndDisabled();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("Last page");
     }
 
@@ -644,15 +692,14 @@ void TableViewerTab::renderPaginationBar(const Theme::Colors& colors) {
 }
 
 void TableViewerTab::nextPage() {
-    const int totalPages = (totalRows + rowsPerPage - 1) / rowsPerPage;
-    if (currentPage < totalPages - 1 && !dataLoadOp.isRunning()) {
-        currentPage++;
-        // When moving to next page from keyboard navigation, select first row
-        if (selectedRow >= 0 && selectedCol >= 0) {
-            selectedRow = 0; // Select first row of new page
-        }
-        loadDataAsync();
+    if (!canGoToNextPage() || dataLoadOp.isRunning()) {
+        return;
     }
+    currentPage++;
+    if (selectedRow >= 0 && selectedCol >= 0) {
+        selectedRow = 0;
+    }
+    loadDataAsync();
 }
 
 void TableViewerTab::previousPage() {
@@ -676,10 +723,11 @@ void TableViewerTab::firstPage() {
 }
 
 void TableViewerTab::lastPage() {
-    if (dataLoadOp.isRunning())
+    if (!canGoToLastPage() || dataLoadOp.isRunning()) {
         return;
+    }
 
-    const int totalPages = (totalRows + rowsPerPage - 1) / rowsPerPage;
+    const int totalPages = std::max(1, (totalRows + rowsPerPage - 1) / rowsPerPage);
     currentPage = totalPages - 1;
     loadDataAsync();
 }
@@ -783,7 +831,9 @@ void TableViewerTab::deleteRow(int row) {
         originalData.erase(originalData.begin() + row);
         editedCells.erase(editedCells.begin() + row);
         isNewRow.erase(isNewRow.begin() + row);
-        totalRows = std::max(0, totalRows - 1);
+        if (!isMongoCollection() || mongoTotalRowsKnown) {
+            totalRows = std::max(0, totalRows - 1);
+        }
     }
 
     if (tableData.empty()) {
@@ -857,7 +907,9 @@ void TableViewerTab::loadDataAsync() {
     // Clear current data to show loading state if filter changed
     if (filterChanged) {
         tableData.clear();
-        totalRows = 0;
+        if (!isMongoCollection()) {
+            totalRows = 0;
+        }
         filterChanged = false;
         spdlog::debug("Cleared previous filtered data, starting fresh load");
     }
@@ -867,7 +919,6 @@ void TableViewerTab::loadDataAsync() {
 
     dataLoadOp.start([this, orderByClause]() -> bool {
         try {
-            totalRows = node_->getRowCount(table_, currentFilter);
             const int offset = currentPage * rowsPerPage;
             tableData =
                 node_->getTableData(table_, rowsPerPage, offset, currentFilter, orderByClause);
@@ -881,6 +932,10 @@ void TableViewerTab::loadDataAsync() {
                     mongoDocumentJson_ = mongoOldNode->getCollectionDocumentsAsJson(
                         table_, rowsPerPage, offset, currentFilter, orderByClause);
                 }
+            }
+
+            if (!isMongoCollection()) {
+                totalRows = node_->getRowCount(table_, currentFilter);
             }
 
             originalData = tableData;
@@ -934,6 +989,11 @@ void TableViewerTab::checkAsyncLoadStatus() {
 
             QueryHistory::instance().add(query, static_cast<int>(tableData.size()));
         }
+    });
+
+    mongoCountOp.check([this](int count) {
+        totalRows = std::max(0, count);
+        mongoTotalRowsKnown = true;
     });
 }
 
@@ -1863,6 +1923,42 @@ void TableViewerTab::renderMetadataTab() {
 
 bool TableViewerTab::isMongoCollection() const {
     return node_ && isMongoDbType(node_->getDatabaseType());
+}
+
+void TableViewerTab::startMongoTotalCount() {
+    if (!isMongoCollection() || mongoCountOp.isRunning()) {
+        return;
+    }
+
+    mongoCountOp.start([this]() -> int {
+        if (auto* mongoNode = dynamic_cast<MongoDBDatabaseNode*>(node_)) {
+            return mongoNode->getEstimatedDocumentCount(table_);
+        }
+        if (auto* mongoOldNode = dynamic_cast<MongoDBOldDatabaseNode*>(node_)) {
+            return mongoOldNode->getEstimatedDocumentCount(table_);
+        }
+        return -1;
+    });
+}
+
+bool TableViewerTab::mongoHasMorePages() const {
+    return static_cast<int>(tableData.size()) >= rowsPerPage;
+}
+
+bool TableViewerTab::canGoToNextPage() const {
+    if (isMongoCollection() && !mongoTotalRowsKnown) {
+        return mongoHasMorePages();
+    }
+    const int totalPages = std::max(1, (totalRows + rowsPerPage - 1) / rowsPerPage);
+    return currentPage < totalPages - 1;
+}
+
+bool TableViewerTab::canGoToLastPage() const {
+    if (isMongoCollection() && !mongoTotalRowsKnown) {
+        return false;
+    }
+    const int totalPages = std::max(1, (totalRows + rowsPerPage - 1) / rowsPerPage);
+    return currentPage < totalPages - 1;
 }
 
 void TableViewerTab::renderMongoJsonView(float /*width*/, float height) {

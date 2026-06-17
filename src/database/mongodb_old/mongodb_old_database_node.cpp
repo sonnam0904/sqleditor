@@ -291,6 +291,28 @@ int MongoDBOldDatabaseNode::getRowCount(const Table& collection, const std::stri
     }
 }
 
+int MongoDBOldDatabaseNode::getEstimatedDocumentCount(const Table& collection) {
+    if (!parentDb) {
+        return 0;
+    }
+
+    try {
+        std::string error;
+        const int64_t count =
+            parentDb->getLegacyClient().estimatedDocumentCount(name, collection.name, error);
+        if (!error.empty()) {
+            spdlog::error("Error getting estimated document count for {}: {}", collection.name,
+                          error);
+            return 0;
+        }
+        return static_cast<int>(count);
+    } catch (const std::exception& e) {
+        spdlog::error("Error getting estimated document count for {}: {}", collection.name,
+                      e.what());
+        return 0;
+    }
+}
+
 QueryResult MongoDBOldDatabaseNode::executeQuery(const std::string& query, const int rowLimit) {
     if (parentDb) {
         return parentDb->executeQueryForDatabase(query, rowLimit, name);

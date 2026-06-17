@@ -68,6 +68,7 @@ public:
 
     [[nodiscard]] int getRowCount(const Table& table,
                                   const std::string& whereClause = "") override;
+    [[nodiscard]] int getEstimatedDocumentCount(const Table& collection);
 
     [[nodiscard]] bool isTablesLoaded() const override {
         return collectionsLoaded;

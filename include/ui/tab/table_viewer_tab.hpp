@@ -71,11 +71,13 @@ private:
     int currentPage = 0;
     int rowsPerPage = 100;
     int totalRows = 0;
+    bool mongoTotalRowsKnown = false;
 
     // Async loading state
     bool hasLoadingError = false;
     std::string loadingError;
     AsyncOperation<bool> dataLoadOp;
+    AsyncOperation<int> mongoCountOp;
 
     // Edit state
     int selectedRow = -1;
@@ -142,4 +144,8 @@ private:
     void syncValuePanelBuffer();
     void renderToolbar(const Theme::Colors& colors);
     void renderPaginationBar(const Theme::Colors& colors);
+    void startMongoTotalCount();
+    [[nodiscard]] bool mongoHasMorePages() const;
+    [[nodiscard]] bool canGoToNextPage() const;
+    [[nodiscard]] bool canGoToLastPage() const;
 };

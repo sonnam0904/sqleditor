@@ -130,15 +130,20 @@ namespace {
         }
 
         auto coll = db[cmd.collection];
-        const int effectiveLimit = cmd.limit >= 0 ? cmd.limit : rowLimit;
 
         if (iequals(method, "find") || iequals(method, "findOne")) {
             bsoncxx::document::view_or_value filter = parseShellDocument(
                 cmd.args.empty() ? "{}" : cmd.args[0]);
             mongocxx::options::find opts;
-            opts.limit(iequals(method, "findOne") ? 1 : effectiveLimit);
+            const int findLimit = iequals(method, "findOne")
+                                      ? 1
+                                      : (cmd.limit >= 0 ? cmd.limit : kDefaultMongoFindLimit);
+            opts.limit(findLimit);
             if (cmd.skip > 0) {
                 opts.skip(cmd.skip);
+            }
+            if (!cmd.sort.empty()) {
+                opts.sort(parseShellDocument(cmd.sort).view());
             }
             auto cursor = coll.find(filter, opts);
             appendFindRows(s, cursor);
@@ -442,7 +447,7 @@ QueryResult MongoDBDatabase::executeQueryForDatabase(const std::string& query, i
             }
 
             mongocxx::options::find opts;
-            opts.limit(rowLimit);
+            opts.limit(kDefaultMongoFindLimit);
 
             auto cursor = coll.find(filter, opts);
             appendFindRows(s, cursor);

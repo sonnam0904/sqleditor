@@ -432,6 +432,20 @@ int MongoDBDatabaseNode::getRowCount(const Table& collection, const std::string&
     }
 }
 
+int MongoDBDatabaseNode::getEstimatedDocumentCount(const Table& collection) {
+    const std::string& collectionName = collection.name;
+    try {
+        auto client = parentDb->getClient();
+        auto db = (*client)[name];
+        auto coll = db[collectionName];
+        return static_cast<int>(coll.estimated_document_count());
+    } catch (const std::exception& e) {
+        spdlog::error("Error getting estimated document count for {}: {}", collectionName,
+                      e.what());
+        return 0;
+    }
+}
+
 QueryResult MongoDBDatabaseNode::executeQuery(const std::string& query, const int rowLimit) {
     if (parentDb) {
         return parentDb->executeQueryForDatabase(query, rowLimit, name);

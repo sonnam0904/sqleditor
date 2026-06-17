@@ -148,13 +148,16 @@ bool executeMongoShellCommand(const MongoShellCommand& cmd, const std::string& d
     }
 
     const std::string& collection = cmd.collection;
-    const int effectiveLimit = cmd.limit >= 0 ? cmd.limit : rowLimit;
+    const int aggregateLimit = cmd.limit >= 0 ? cmd.limit : rowLimit;
 
     if (iequals(method, "find") || iequals(method, "findOne")) {
         const std::string filterJson = shellToJson(cmd.args.empty() ? "{}" : cmd.args[0]);
-        const int limit = iequals(method, "findOne") ? 1 : effectiveLimit;
+        const int limit = iequals(method, "findOne")
+                              ? 1
+                              : (cmd.limit >= 0 ? cmd.limit : kDefaultMongoFindLimit);
+        const std::string sortJson = cmd.sort.empty() ? "" : shellToJson(cmd.sort);
         const auto findResult =
-            client.find(dbName, collection, filterJson, limit, cmd.skip, "", error);
+            client.find(dbName, collection, filterJson, limit, cmd.skip, sortJson, error);
         if (!error.empty()) {
             s.success = false;
             s.errorMessage = error;
@@ -167,7 +170,7 @@ bool executeMongoShellCommand(const MongoShellCommand& cmd, const std::string& d
     if (iequals(method, "aggregate")) {
         const std::string pipelineJson = shellToJson(cmd.args.empty() ? "[]" : cmd.args[0]);
         const auto findResult =
-            client.aggregate(dbName, collection, pipelineJson, effectiveLimit, error);
+            client.aggregate(dbName, collection, pipelineJson, aggregateLimit, error);
         if (!error.empty()) {
             s.success = false;
             s.errorMessage = error;
@@ -447,7 +450,7 @@ QueryResult MongoDBOldDatabase::executeQueryForDatabase(const std::string& query
         if (command == "find" && !collName.empty()) {
             const std::string filterJson =
                 doc.contains("filter") ? doc["filter"].dump() : "{}";
-            const int limit = doc.value("limit", rowLimit);
+            const int limit = doc.value("limit", kDefaultMongoFindLimit);
             const int skip = doc.value("skip", 0);
             const std::string sortJson =
                 doc.contains("sort") ? doc["sort"].dump() : "";

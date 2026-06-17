@@ -84,6 +84,7 @@ public:
                                                           const std::string& sort = "");
     std::vector<std::string> getColumnNames(const Table& collection) override;
     int getRowCount(const Table& collection, const std::string& filter = "") override;
+    [[nodiscard]] int getEstimatedDocumentCount(const Table& collection);
 
     [[nodiscard]] bool isTablesLoaded() const override {
         return collectionsLoaded;

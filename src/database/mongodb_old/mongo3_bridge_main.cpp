@@ -237,7 +237,7 @@ void handleListCollections(const nlohmann::json& req, nlohmann::json& resp) {
     }
 
     bson_error_t bsonError{};
-    char** names = mongoc_database_get_collection_names(db, &bsonError);
+    char** names = mongoc_database_get_collection_names_with_opts(db, nullptr, &bsonError);
     mongoc_database_destroy(db);
 
     if (!names) {
@@ -450,6 +450,39 @@ void handleCount(const nlohmann::json& req, nlohmann::json& resp) {
     resp["count"] = count;
 }
 
+void handleEstimatedCount(const nlohmann::json& req, nlohmann::json& resp) {
+    if (!req.contains("db") || !req.contains("collection")) {
+        resp["ok"] = false;
+        resp["error"] = "estimated_count requires db and collection";
+        return;
+    }
+
+    const std::string dbName = req["db"].get<std::string>();
+    const std::string collName = req["collection"].get<std::string>();
+
+    std::string error;
+    mongoc_collection_t* coll = openCollection(dbName, collName, error);
+    if (!coll) {
+        resp["ok"] = false;
+        resp["error"] = error;
+        return;
+    }
+
+    bson_error_t bsonError{};
+    const int64_t count = mongoc_collection_estimated_document_count(coll, nullptr, nullptr,
+                                                                     nullptr, &bsonError);
+    mongoc_collection_destroy(coll);
+
+    if (count < 0) {
+        resp["ok"] = false;
+        resp["error"] = bsonError.message;
+        return;
+    }
+
+    resp["ok"] = true;
+    resp["count"] = count;
+}
+
 void handleAggregate(const nlohmann::json& req, nlohmann::json& resp) {
     if (!req.contains("db") || !req.contains("collection")) {
         resp["ok"] = false;
@@ -590,6 +623,8 @@ void dispatch(const nlohmann::json& req) {
         handleFind(req, resp);
     } else if (op == "count") {
         handleCount(req, resp);
+    } else if (op == "estimated_count") {
+        handleEstimatedCount(req, resp);
     } else if (op == "aggregate") {
         handleAggregate(req, resp);
     } else if (op == "run_command") {

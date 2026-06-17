@@ -4,6 +4,7 @@
 #include "application.hpp"
 #include "database/mongodb.hpp"
 #include "database/mongodb/mongodb_database_node.hpp"
+#include "database/mongodb/mongo_shell.hpp"
 #include "database/mongodb_old.hpp"
 #include "database/mongodb_old/mongodb_old_database_node.hpp"
 #include "imgui.h"
@@ -32,10 +33,10 @@ namespace {
     constexpr const char* LABEL_RUNNING_QUERY = "Running query...";
     constexpr const char* LABEL_CANCEL = "Cancel";
     constexpr const char* LABEL_NO_ROWS = "No rows returned.";
-    constexpr const char* LABEL_ROW_LIMIT = "(limited to 1000 rows)";
+    constexpr const char* LABEL_ROW_LIMIT = "(limited to 100 rows)";
     constexpr const char* LABEL_NO_RESULTS =
         "No results to display. Execute a query to see results here.";
-    constexpr int MAX_QUERY_ROWS = 1000;
+    constexpr int MAX_QUERY_ROWS = kDefaultMongoFindLimit;
 
     using CI = sqleditor::TextEditor::CompletionItem;
     using CK = sqleditor::TextEditor::CompletionKind;

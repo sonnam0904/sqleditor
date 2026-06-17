@@ -20,6 +20,7 @@ public:
     DatabaseHierarchy* getHierarchy(const std::shared_ptr<DatabaseInterface>& db);
 
 private:
+    void renderTableSearchBar();
     void renderStructure();
     void renderHistory();
     void renderEmpty();

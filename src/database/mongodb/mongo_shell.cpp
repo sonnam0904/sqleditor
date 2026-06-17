@@ -213,7 +213,7 @@ namespace {
         return args;
     }
 
-    bool parseTrailingChain(std::string& query, int& limit, int& skip) {
+    bool parseTrailingChain(std::string& query, MongoShellCommand& cmd) {
         bool changed = false;
         while (true) {
             const std::string trimmed = trim(query);
@@ -234,11 +234,22 @@ namespace {
                 break;
             }
 
+            if (iequals(name, "sort")) {
+                auto arg = extractParenContent(tailView, idx);
+                if (!arg || idx < tailView.size() || !cmd.sort.empty()) {
+                    break;
+                }
+                cmd.sort = *arg;
+                query = trim(trimmed.substr(0, dotPos));
+                changed = true;
+                continue;
+            }
+
             int* target = nullptr;
             if (iequals(name, "limit")) {
-                target = &limit;
+                target = &cmd.limit;
             } else if (iequals(name, "skip")) {
-                target = &skip;
+                target = &cmd.skip;
             } else {
                 break;
             }
@@ -317,7 +328,7 @@ std::optional<MongoShellCommand> tryParseMongoShell(const std::string& query) {
     }
 
     MongoShellCommand cmd;
-    parseTrailingChain(work, cmd.limit, cmd.skip);
+    parseTrailingChain(work, cmd);
 
     size_t pos = 3;
     const std::string first = readIdentifier(work, pos);

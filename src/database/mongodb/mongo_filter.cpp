@@ -674,6 +674,14 @@ bsoncxx::document::value parseMongoFilter(const std::string& filter) {
     return document{} << finalize;
 }
 
+bool isMongoFilterEmpty(const std::string& filter) {
+    const std::string trimmed = trim(filter);
+    if (trimmed.empty() || trimmed == "{}") {
+        return true;
+    }
+    return parseMongoFilter(filter).view().empty();
+}
+
 bsoncxx::document::value parseMongoSort(const std::string& sort) {
     const std::string trimmed = trim(sort);
     if (trimmed.empty()) {
