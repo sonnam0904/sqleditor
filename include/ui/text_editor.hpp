@@ -91,6 +91,7 @@ namespace sqleditor {
         // formatting
         [[nodiscard]] static std::string FormatSQL(const std::string& sql);
         [[nodiscard]] static std::string FormatJSON(const std::string& json);
+        [[nodiscard]] static std::string FormatMongoShell(const std::string& shell);
 
         // Callbacks
         void SetSubmitCallback(std::function<void()> cb);

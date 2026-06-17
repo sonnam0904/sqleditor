@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <regex>
+#include <sstream>
 #include <string_view>
 
 namespace {
@@ -13,6 +14,83 @@ namespace {
             s.remove_suffix(1);
         }
         return std::string(s);
+    }
+
+    std::string collapseShellWhitespace(std::string_view s) {
+        std::string out;
+        out.reserve(s.size());
+        bool inString = false;
+        char quote = '\0';
+        bool lastWasSpace = false;
+
+        for (size_t i = 0; i < s.size(); ++i) {
+            const char c = s[i];
+            if (inString) {
+                out += c;
+                if (c == '\\' && i + 1 < s.size()) {
+                    out += s[++i];
+                    continue;
+                }
+                if (c == quote) {
+                    inString = false;
+                }
+                lastWasSpace = false;
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                inString = true;
+                quote = c;
+                out += c;
+                lastWasSpace = false;
+                continue;
+            }
+            if (std::isspace(static_cast<unsigned char>(c))) {
+                if (!lastWasSpace && !out.empty()) {
+                    out += ' ';
+                    lastWasSpace = true;
+                }
+                continue;
+            }
+            lastWasSpace = false;
+            out += c;
+        }
+
+        while (!out.empty() && out.back() == ' ') {
+            out.pop_back();
+        }
+        return out;
+    }
+
+    bool mongoCommandParenBalanced(std::string_view s) {
+        int depth = 0;
+        bool seenOpen = false;
+        bool inString = false;
+        char quote = '\0';
+        for (size_t i = 0; i < s.size(); ++i) {
+            const char c = s[i];
+            if (inString) {
+                if (c == '\\' && i + 1 < s.size()) {
+                    ++i;
+                    continue;
+                }
+                if (c == quote) {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                inString = true;
+                quote = c;
+                continue;
+            }
+            if (c == '(') {
+                ++depth;
+                seenOpen = true;
+            } else if (c == ')') {
+                --depth;
+            }
+        }
+        return seenOpen && depth == 0;
     }
 
     std::string stripLineComments(std::string s) {
@@ -227,6 +305,7 @@ std::string shellLiteralToExtendedJson(std::string_view literal) {
 
 std::optional<MongoShellCommand> tryParseMongoShell(const std::string& query) {
     std::string work = stripLineComments(query);
+    work = collapseShellWhitespace(work);
     work = trim(work);
     if (work.empty() || work.front() == '{') {
         return std::nullopt;
@@ -295,4 +374,64 @@ std::optional<MongoShellCommand> tryParseMongoShell(const std::string& query) {
     }
 
     return cmd;
+}
+
+std::vector<std::string> splitMongoShellCommands(const std::string& text) {
+    std::vector<std::string> commands;
+    std::string current;
+
+    auto flush = [&]() {
+        const std::string collapsed = trim(collapseShellWhitespace(current));
+        if (!collapsed.empty() && collapsed.rfind("db.", 0) == 0) {
+            commands.push_back(collapsed);
+        }
+        current.clear();
+    };
+
+    std::string line;
+    std::istringstream stream(text);
+    while (std::getline(stream, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ';')) {
+            line.pop_back();
+        }
+        size_t start = 0;
+        while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start]))) {
+            ++start;
+        }
+        if (start > 0) {
+            line.erase(0, start);
+        }
+
+        if (line.empty()) {
+            if (!current.empty()) {
+                flush();
+            }
+            continue;
+        }
+
+        if (line.rfind("db.", 0) == 0) {
+            if (!current.empty()) {
+                flush();
+            }
+            current = line;
+            continue;
+        }
+
+        if (!current.empty()) {
+            current += ' ';
+            current += line;
+            continue;
+        }
+
+        // Chained call on its own line after a completed command, e.g. ".limit(100)".
+        if (!commands.empty() && !line.empty() && line.front() == '.') {
+            commands.back() += ' ' + line;
+        }
+    }
+
+    if (!current.empty()) {
+        flush();
+    }
+
+    return commands;
 }

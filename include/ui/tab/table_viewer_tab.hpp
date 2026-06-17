@@ -48,6 +48,7 @@ public:
 
     // SQL generation and confirmation dialog
     std::vector<std::string> generateUpdateSQL();
+    [[nodiscard]] std::vector<std::string> generateMongoShellCommands() const;
     [[nodiscard]] std::vector<std::string> getPrimaryKeyColumns() const;
     void showSaveConfirmationDialog();
     void checkSQLExecutionStatus();

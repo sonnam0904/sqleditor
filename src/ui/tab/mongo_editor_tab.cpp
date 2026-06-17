@@ -2,8 +2,12 @@
 #include "IconsFontAwesome6.h"
 #include "ai/ai_chat.hpp"
 #include "application.hpp"
+#include "database/mongodb.hpp"
 #include "database/mongodb/mongodb_database_node.hpp"
+#include "database/mongodb_old.hpp"
+#include "database/mongodb_old/mongodb_old_database_node.hpp"
 #include "imgui.h"
+#include "spdlog/spdlog.h"
 #include "themes.hpp"
 #include "ui/ai_chat_panel.hpp"
 #include "ui/ai_settings_dialog.hpp"
@@ -15,8 +19,12 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <optional>
+#include <ranges>
 #include <string_view>
 #include <vector>
 
@@ -355,7 +363,7 @@ namespace {
 } // namespace
 
 MongoEditorTab::MongoEditorTab(const std::string& name, IDatabaseNode* node)
-    : Tab(name, TabType::MONGO_EDITOR), node_(node) {
+    : Tab(name, TabType::MONGO_EDITOR), node_(node), scriptName_(name) {
     editor_.SetShowLineNumbers(true);
     editor_.SetLanguage(sqleditor::TextEditor::Language::MongoShell);
 
@@ -381,6 +389,7 @@ MongoEditorTab::MongoEditorTab(const std::string& name, IDatabaseNode* node)
         query_ = editor_.GetText();
         startQueryExecutionAsync(query_);
     });
+    std::strncpy(renameBuffer_, scriptName_.c_str(), sizeof(renameBuffer_) - 1);
 }
 
 MongoEditorTab::~MongoEditorTab() {
@@ -399,9 +408,14 @@ void MongoEditorTab::render() {
 
     checkQueryExecutionStatus();
 
+    const bool wantSave = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
+                          (ImGui::GetIO().KeyMods & ImGuiMod_Shortcut) &&
+                          ImGui::IsKeyPressed(ImGuiKey_S, false);
+
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() - Theme::Spacing::S);
-    renderHeader();
+    renderConnectionInfo();
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + Theme::Spacing::S);
+    renderScriptHeader();
 
     AISettingsDialog::instance().render();
 
@@ -423,14 +437,22 @@ void MongoEditorTab::render() {
 
         if (ImGui::BeginChild("MongoEditor", ImVec2(-1, editorHeight), true,
                               ImGuiWindowFlags_NoScrollbar)) {
-            if (pendingEditorFocusFrames_ > 0) {
+            if (pendingEditorFocusFrames_ > 0 && !renamingScript_) {
                 editor_.SetFocus();
                 pendingEditorFocusFrames_--;
             }
             editor_.Render("##Mongo", ImVec2(-1, -1), true);
-            query_ = editor_.GetText();
+            const std::string newText = editor_.GetText();
+            if (newText != query_) {
+                query_ = newText;
+                contentModified_ = true;
+            }
         }
         ImGui::EndChild();
+
+        if (wantSave) {
+            saveScript();
+        }
 
         renderToolbar();
         UIUtils::Splitter("##mongo_splitter", &splitterPosition_, totalContentHeight_, 100.0f,
@@ -489,22 +511,297 @@ void MongoEditorTab::render() {
     renderAIToggleStrip(toggleStripWidth, totalContentHeight_);
 }
 
-void MongoEditorTab::renderHeader() const {
+void MongoEditorTab::renderConnectionInfo() {
     if (!node_) {
-        ImGui::Text("Query Editor (No database selected)");
-        ImGui::Separator();
+        ImGui::Text("Database: (none)");
         return;
     }
 
-    const auto& colors = Application::getInstance().getCurrentColors();
+    if (auto* dbNode = dynamic_cast<MongoDBDatabaseNode*>(node_)) {
+        if (!dbNode->parentDb) {
+            ImGui::Text("Database: %s", node_->getFullPath().c_str());
+            return;
+        }
+
+        auto* serverDb = dbNode->parentDb;
+        const auto& dbMap = serverDb->getDatabaseDataMap();
+        std::vector<std::string> dbNames;
+        dbNames.reserve(dbMap.size());
+        for (const auto& name : dbMap | std::views::keys)
+            dbNames.push_back(name);
+        std::ranges::sort(dbNames);
+
+        renderDatabaseCombo(serverDb->getConnectionInfo().host, "Database:", dbNode->name, dbNames,
+                            [serverDb, this](const std::string& name) {
+                                if (auto* n = serverDb->getDatabaseData(name))
+                                    switchNode(n);
+                            });
+        return;
+    }
+
+    if (auto* dbNode = dynamic_cast<MongoDBOldDatabaseNode*>(node_)) {
+        if (!dbNode->parentDb) {
+            ImGui::Text("Database: %s", node_->getFullPath().c_str());
+            return;
+        }
+
+        auto* serverDb = dbNode->parentDb;
+        const auto& dbMap = serverDb->getDatabaseDataMap();
+        std::vector<std::string> dbNames;
+        dbNames.reserve(dbMap.size());
+        for (const auto& name : dbMap | std::views::keys)
+            dbNames.push_back(name);
+        std::ranges::sort(dbNames);
+
+        renderDatabaseCombo(serverDb->getConnectionInfo().host, "Database:", dbNode->name, dbNames,
+                            [serverDb, this](const std::string& name) {
+                                if (auto* n = serverDb->getDatabaseData(name))
+                                    switchNode(n);
+                            });
+        return;
+    }
+
+    ImGui::Text("Database: %s", node_->getFullPath().c_str());
+}
+
+void MongoEditorTab::renderDatabaseCombo(const std::string& host, const char* label,
+                                           const std::string& currentName,
+                                           const std::vector<std::string>& dbNames,
+                                           const std::function<void(const std::string&)>& onSelect) {
     ImGui::AlignTextToFramePadding();
-    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(colors.green));
-    ImGui::Text(ICON_FA_DATABASE);
+    ImGui::Text("%s", host.c_str());
+    ImGui::SameLine(0, Theme::Spacing::L);
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("%s", label);
+    ImGui::SameLine(0, Theme::Spacing::S);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Theme::Spacing::S, Theme::Spacing::S));
+
+    if (queryExecutionOp_.isRunning())
+        ImGui::BeginDisabled();
+
+    ImGui::SetNextItemWidth(150.0f);
+    if (ImGui::BeginCombo("##mongo_db_combo", currentName.c_str())) {
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                            ImVec2(ImGui::GetStyle().ItemSpacing.x, Theme::Spacing::XS));
+        for (const auto& name : dbNames) {
+            const bool isSelected = (name == currentName);
+            if (ImGui::Selectable(name.c_str(), isSelected, ImGuiSelectableFlags_None,
+                                  ImVec2(0, ImGui::GetTextLineHeight() + Theme::Spacing::S))) {
+                if (name != currentName)
+                    onSelect(name);
+            }
+            if (isSelected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::PopStyleVar();
+        ImGui::EndCombo();
+    }
+
+    if (queryExecutionOp_.isRunning())
+        ImGui::EndDisabled();
+
+    ImGui::PopStyleVar();
+}
+
+void MongoEditorTab::switchNode(IDatabaseNode* newNode) {
+    if (!newNode || newNode == node_)
+        return;
+
+    node_ = newNode;
+    completionKeywordsSet_ = false;
+
+    if (aiChatState_) {
+        aiChatState_->setDatabaseNode(node_);
+    }
+}
+
+void MongoEditorTab::renderScriptHeader() {
+    const auto& colors = Application::getInstance().getCurrentColors();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+    ImGui::TextUnformatted(ICON_FA_FILE_CODE);
     ImGui::PopStyleColor();
     ImGui::SameLine(0, Theme::Spacing::S);
-    ImGui::Text("%s", node_->getFullPath().c_str());
 
+    if (renamingScript_) {
+        if (renamingFocusNeeded_) {
+            ImGui::SetKeyboardFocusHere(0);
+            renamingFocusNeeded_ = false;
+        }
+
+        ImGui::SetNextItemWidth(200.0f);
+        const bool committed = ImGui::InputText(
+            "##mongo_script_rename", renameBuffer_, sizeof(renameBuffer_),
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+
+        if (ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            renamingScript_ = false;
+        } else if (committed) {
+            if (renameBuffer_[0] != '\0') {
+                const std::string newName = renameBuffer_;
+                if (!filePath_.empty() && std::filesystem::exists(filePath_)) {
+                    const std::string dir = getDefaultScriptsDir();
+                    const std::filesystem::path newPath =
+                        std::filesystem::path(dir) / (newName + kScriptExtension);
+                    std::error_code ec;
+                    if (std::filesystem::exists(newPath) &&
+                        !std::filesystem::equivalent(filePath_, newPath, ec)) {
+                        spdlog::warn("Cannot rename: '{}' already exists", newPath.string());
+                    } else {
+                        std::filesystem::rename(filePath_, newPath, ec);
+                        if (ec) {
+                            spdlog::error("Failed to rename script file: {}", ec.message());
+                        } else {
+                            filePath_ = newPath.string();
+                            scriptName_ = newName;
+                            setName(scriptName_);
+                            persistScriptToAppState();
+                        }
+                    }
+                } else {
+                    scriptName_ = newName;
+                    setName(scriptName_);
+                    contentModified_ = true;
+                }
+            }
+            renamingScript_ = false;
+        }
+
+        ImGui::SameLine(0, 0);
+        ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+        ImGui::TextUnformatted(kScriptExtension);
+        ImGui::PopStyleColor();
+    } else {
+        const bool saved = !filePath_.empty();
+        ImGui::PushStyleColor(ImGuiCol_Text, saved ? colors.text : colors.subtext0);
+        ImGui::TextUnformatted(scriptName_.c_str());
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine(0, Theme::Spacing::S);
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(colors.surface1.x, colors.surface1.y,
+                                                             colors.surface1.z, 0.6f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, colors.surface2);
+        ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                            ImVec2(Theme::Spacing::XS, Theme::Spacing::XS));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        if (ImGui::SmallButton(ICON_FA_PENCIL "##rename_mongo_script")) {
+            std::strncpy(renameBuffer_, scriptName_.c_str(), sizeof(renameBuffer_) - 1);
+            renamingScript_ = true;
+            renamingFocusNeeded_ = true;
+        }
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(4);
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Rename script");
+
+        if (contentModified_) {
+            ImGui::SameLine(0, Theme::Spacing::S);
+            ImGui::PushStyleColor(ImGuiCol_Text, colors.peach);
+            ImGui::TextUnformatted(ICON_FA_CIRCLE "  unsaved");
+            ImGui::PopStyleColor();
+        } else if (!filePath_.empty()) {
+            ImGui::SameLine(0, Theme::Spacing::S);
+            ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
+            ImGui::TextUnformatted(filePath_.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
     ImGui::Separator();
+}
+
+std::string MongoEditorTab::getDefaultScriptsDir() {
+#ifdef _WIN32
+    const char* home = std::getenv("USERPROFILE");
+#else
+    const char* home = std::getenv("HOME");
+#endif
+    const std::filesystem::path dir = home ? std::filesystem::path(home) / ".sqleditor" / "scripts"
+                                           : std::filesystem::path(".") / "scripts";
+    std::filesystem::create_directories(dir);
+    return dir.string();
+}
+
+void MongoEditorTab::saveScript() {
+    if (filePath_.empty()) {
+        const std::string dir = getDefaultScriptsDir();
+        std::string safeName = scriptName_;
+        for (char& c : safeName) {
+            if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' ||
+                c == '>' || c == '|')
+                c = '_';
+        }
+        if (safeName.empty())
+            safeName = "untitled";
+        std::filesystem::path candidate =
+            std::filesystem::path(dir) / (safeName + kScriptExtension);
+        int n = 1;
+        while (std::filesystem::exists(candidate) && scriptId_ == 0) {
+            candidate = std::filesystem::path(dir) /
+                        (safeName + "_" + std::to_string(n++) + kScriptExtension);
+        }
+        filePath_ = candidate.string();
+    }
+
+    std::ofstream out(filePath_, std::ios::out | std::ios::trunc);
+    if (!out) {
+        spdlog::error("Failed to write script file: {}", filePath_);
+        return;
+    }
+    out << query_;
+    out.close();
+
+    contentModified_ = false;
+    persistScriptToAppState();
+    setName(scriptName_);
+    spdlog::debug("Saved mongo script '{}' to {}", scriptName_, filePath_);
+}
+
+void MongoEditorTab::persistScriptToAppState() {
+    auto* appState = Application::getInstance().getAppState();
+    if (!appState)
+        return;
+
+    SqlScript s;
+    s.id = scriptId_;
+    s.name = scriptName_;
+    s.filePath = filePath_;
+
+    if (node_) {
+        if (auto* ownerDb = node_->ownerDatabase())
+            s.connectionId = ownerDb->getConnectionId();
+        s.databaseName = node_->getName();
+    }
+
+    if (scriptId_ == 0) {
+        const int newId = appState->saveScript(s);
+        if (newId > 0)
+            scriptId_ = newId;
+    } else {
+        appState->updateScript(s);
+    }
+}
+
+void MongoEditorTab::loadFromScript(const SqlScript& script) {
+    scriptId_ = script.id;
+    scriptName_ = script.name;
+    filePath_ = script.filePath;
+    std::strncpy(renameBuffer_, scriptName_.c_str(), sizeof(renameBuffer_) - 1);
+
+    std::ifstream in(filePath_);
+    if (in) {
+        const std::string content((std::istreambuf_iterator<char>(in)),
+                                  std::istreambuf_iterator<char>());
+        query_ = content;
+        editor_.SetText(content);
+    }
+    contentModified_ = false;
+    setName(scriptName_);
 }
 
 void MongoEditorTab::renderToolbar() {
@@ -747,17 +1044,24 @@ void MongoEditorTab::formatQuery() {
     if (text.empty()) {
         return;
     }
-    const std::string trimmed = [&] {
-        std::string s = text;
-        s.erase(0, s.find_first_not_of(" \t\n\r"));
-        return s;
-    }();
-    if (!trimmed.empty() && trimmed.front() == '{') {
-        std::string formatted = sqleditor::TextEditor::FormatJSON(text);
-        if (!formatted.empty()) {
-            editor_.SetText(formatted);
-            query_ = formatted;
-        }
+
+    std::string trimmed = text;
+    const auto first = trimmed.find_first_not_of(" \t\n\r");
+    if (first == std::string::npos) {
+        return;
+    }
+    trimmed.erase(0, first);
+
+    std::string formatted;
+    if (trimmed.front() == '{') {
+        formatted = sqleditor::TextEditor::FormatJSON(text);
+    } else if (trimmed.rfind("db.", 0) == 0 || text.find("db.") != std::string::npos) {
+        formatted = sqleditor::TextEditor::FormatMongoShell(text);
+    }
+
+    if (!formatted.empty() && formatted != text) {
+        editor_.SetText(formatted);
+        query_ = formatted;
     }
 }
 

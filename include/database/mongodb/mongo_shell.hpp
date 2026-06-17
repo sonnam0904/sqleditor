@@ -18,5 +18,8 @@ struct MongoShellCommand {
 // Returns nullopt when the input is not shell syntax (caller may try legacy JSON).
 std::optional<MongoShellCommand> tryParseMongoShell(const std::string& query);
 
+// Split editor text into individual db.* shell commands (supports multi-line formatting).
+std::vector<std::string> splitMongoShellCommands(const std::string& text);
+
 // Convert a shell/JS-like literal to strict extended JSON for bsoncxx::from_json().
 std::string shellLiteralToExtendedJson(std::string_view literal);

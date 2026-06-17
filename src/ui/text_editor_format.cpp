@@ -1,9 +1,12 @@
 #include "ui/text_editor.hpp"
+#include "database/mongodb/mongo_shell.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <tree_sitter/api.h>
 
 extern "C" const TSLanguage* tree_sitter_sql();
@@ -369,6 +372,196 @@ namespace sqleditor {
             }
         }
 
+        std::string trimView(std::string_view s) {
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+                s.remove_prefix(1);
+            }
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+                s.remove_suffix(1);
+            }
+            return std::string(s);
+        }
+
+        bool isMongoMethodName(std::string_view name) {
+            static constexpr std::string_view kMethods[] = {
+                "find",           "findOne",        "aggregate",      "insertOne",
+                "insertMany",     "updateOne",      "updateMany",     "replaceOne",
+                "deleteOne",      "deleteMany",     "countDocuments", "estimatedDocumentCount",
+                "distinct",       "drop",           "renameCollection", "createIndex",
+                "dropIndex",      "getIndexes",     "createCollection", "runCommand",
+                "getCollectionNames", "getCollection", "getSiblingDB", "adminCommand",
+                "limit",          "skip",           "sort",           "project",
+                "hint",           "explain",        "mapReduce",      "watch",
+                "bulkWrite",      "stats",          "dataSize",       "storageSize",
+                "totalIndexSize", "validate",       "getShardDistribution",
+            };
+            for (const auto method : kMethods) {
+                if (name == method) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        size_t findMethodOpenParen(std::string_view cmd) {
+            for (size_t i = 0; i < cmd.size(); ++i) {
+                if (cmd[i] != '.') {
+                    continue;
+                }
+                size_t j = i + 1;
+                while (j < cmd.size() &&
+                       (std::isalnum(static_cast<unsigned char>(cmd[j])) || cmd[j] == '_')) {
+                    ++j;
+                }
+                if (j >= cmd.size() || cmd[j] != '(') {
+                    continue;
+                }
+                const std::string_view method = cmd.substr(i + 1, j - i - 1);
+                if (isMongoMethodName(method)) {
+                    return j;
+                }
+            }
+            return std::string_view::npos;
+        }
+
+        size_t findMatchingCloseParen(std::string_view s, const size_t open) {
+            if (open >= s.size() || s[open] != '(') {
+                return std::string_view::npos;
+            }
+
+            int depth = 0;
+            bool inString = false;
+            char quote = '\0';
+            for (size_t i = open; i < s.size(); ++i) {
+                const char c = s[i];
+                if (inString) {
+                    if (c == '\\' && i + 1 < s.size()) {
+                        ++i;
+                        continue;
+                    }
+                    if (c == quote) {
+                        inString = false;
+                    }
+                    continue;
+                }
+                if (c == '"' || c == '\'') {
+                    inString = true;
+                    quote = c;
+                    continue;
+                }
+                if (c == '(') {
+                    ++depth;
+                } else if (c == ')') {
+                    --depth;
+                    if (depth == 0) {
+                        return i;
+                    }
+                }
+            }
+            return std::string_view::npos;
+        }
+
+        std::string formatMongoLiteral(std::string_view content, const int indentLevel) {
+            constexpr int kIndentWidth = 2;
+            std::string out;
+            int depth = 0;
+            bool inString = false;
+            char quote = '\0';
+
+            auto appendIndent = [&]() {
+                if (!out.empty() && out.back() != '\n') {
+                    out += '\n';
+                }
+                out.append(static_cast<size_t>((indentLevel + depth) * kIndentWidth), ' ');
+            };
+
+            for (size_t i = 0; i < content.size(); ++i) {
+                const char c = content[i];
+                if (inString) {
+                    out += c;
+                    if (c == '\\' && i + 1 < content.size()) {
+                        out += content[++i];
+                        continue;
+                    }
+                    if (c == quote) {
+                        inString = false;
+                    }
+                    continue;
+                }
+
+                if (c == '"' || c == '\'') {
+                    inString = true;
+                    quote = c;
+                    out += c;
+                    continue;
+                }
+
+                if (std::isspace(static_cast<unsigned char>(c))) {
+                    continue;
+                }
+
+                if (c == '{' || c == '[') {
+                    out += c;
+                    ++depth;
+                    appendIndent();
+                    continue;
+                }
+
+                if (c == '}' || c == ']') {
+                    depth = std::max(0, depth - 1);
+                    appendIndent();
+                    out += c;
+                    continue;
+                }
+
+                if (c == ',') {
+                    out += c;
+                    appendIndent();
+                    continue;
+                }
+
+                if (c == ':') {
+                    out += ": ";
+                    continue;
+                }
+
+                out += c;
+            }
+
+            return out;
+        }
+
+        std::string formatMongoCommand(std::string cmd) {
+            cmd = trimView(cmd);
+            if (cmd.empty() || cmd.rfind("db.", 0) != 0) {
+                return cmd;
+            }
+
+            const size_t open = findMethodOpenParen(cmd);
+            if (open == std::string_view::npos) {
+                return cmd;
+            }
+
+            const size_t close = findMatchingCloseParen(cmd, open);
+            if (close == std::string_view::npos) {
+                return cmd;
+            }
+
+            const std::string prefix = trimView(cmd.substr(0, open));
+            const std::string args = trimView(cmd.substr(open + 1, close - open - 1));
+            const std::string suffix = trimView(cmd.substr(close + 1));
+            const std::string formattedArgs = formatMongoLiteral(args, 1);
+            std::string result = prefix + "(\n  " + formattedArgs + "\n)";
+            if (!suffix.empty()) {
+                result += "\n" + suffix;
+            }
+            return result;
+        }
+
+        std::vector<std::string> splitMongoShellLines(const std::string& text) {
+            return splitMongoShellCommands(text);
+        }
+
     } // anonymous namespace
 
     std::string TextEditor::FormatSQL(const std::string& sql) {
@@ -436,6 +629,29 @@ namespace sqleditor {
         } catch (const nlohmann::json::parse_error&) {
             return json;
         }
+    }
+
+    std::string TextEditor::FormatMongoShell(const std::string& text) {
+        if (text.empty()) {
+            return text;
+        }
+
+        const auto commands = splitMongoShellLines(text);
+        if (commands.empty()) {
+            return formatMongoCommand(trimView(text)) + "\n";
+        }
+
+        std::string result;
+        for (size_t i = 0; i < commands.size(); ++i) {
+            if (i > 0) {
+                result += "\n\n";
+            }
+            result += formatMongoCommand(commands[i]);
+        }
+        if (!result.empty() && result.back() != '\n') {
+            result += '\n';
+        }
+        return result;
     }
 
 } // namespace sqleditor

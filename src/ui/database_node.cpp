@@ -122,6 +122,30 @@ namespace {
         return ext == ".sql";
     }
 
+    bool isMongoScriptPath(const std::string& path) {
+        if (path.empty())
+            return false;
+        auto ext = std::filesystem::path(path).extension().string();
+        std::ranges::transform(ext, ext.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return ext == ".mongo";
+    }
+
+    bool isSqlScriptPath(const std::string& path) {
+        if (path.empty())
+            return false;
+        auto ext = std::filesystem::path(path).extension().string();
+        std::ranges::transform(ext, ext.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return ext == ".sql";
+    }
+
+    bool scriptMatchesConnectionType(const SqlScript& query, const bool isMongo) {
+        if (query.filePath.empty())
+            return true;
+        return isMongo ? isMongoScriptPath(query.filePath) : isSqlScriptPath(query.filePath);
+    }
+
     std::string summarizeToolFailure(const PostgresToolResult& result) {
         if (!result.output.empty()) {
             constexpr size_t maxLen = 1800;
@@ -4086,6 +4110,18 @@ IDatabaseNode* DatabaseHierarchy::resolveNodeForQuery(const SqlScript& query) co
             return nullptr;
         return oracleDb->getDatabaseData(query.databaseName);
     }
+    if (dbType == DatabaseType::MONGODB) {
+        auto* mongoDb = dynamic_cast<MongoDBDatabase*>(db.get());
+        if (!mongoDb)
+            return nullptr;
+        return mongoDb->getDatabaseData(query.databaseName);
+    }
+    if (dbType == DatabaseType::MONGODB_OLD) {
+        auto* mongoDb = dynamic_cast<MongoDBOldDatabase*>(db.get());
+        if (!mongoDb)
+            return nullptr;
+        return mongoDb->getDatabaseData(query.databaseName);
+    }
     return nullptr;
 }
 
@@ -4102,6 +4138,8 @@ void DatabaseHierarchy::renderQueriesNode() {
         return;
 
     const auto queries = appState->getScriptsForConnection(connId);
+    const auto dbType = db->getConnectionInfo().type;
+    const bool isMongo = isMongoDbType(dbType);
 
     const std::string queriesNodeId = std::format("scripts_conn_{}", static_cast<void*>(db.get()));
     const bool queriesOpen = renderTreeNodeWithIcon("Queries", queriesNodeId, ICON_FA_FILE_CODE,
@@ -4111,10 +4149,9 @@ void DatabaseHierarchy::renderQueriesNode() {
     if (ImGui::BeginPopupContextItem(nullptr)) {
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
                             ImVec2(Theme::Spacing::M, Theme::Spacing::M));
-        if (ImGui::MenuItem("New SQL Query")) {
+        if (ImGui::MenuItem(isMongo ? NEW_QUERY_EDITOR_LABEL : "New SQL Query")) {
             // resolve the first available database node for this connection
             IDatabaseNode* node = nullptr;
-            const auto dbType = db->getConnectionInfo().type;
             if (auto* sqliteDb = dynamic_cast<SQLiteDatabase*>(db.get())) {
                 node = sqliteDb;
             } else if (dbType == DatabaseType::POSTGRESQL || dbType == DatabaseType::REDSHIFT) {
@@ -4149,11 +4186,34 @@ void DatabaseHierarchy::renderQueriesNode() {
                     if (!m.empty() && m.begin()->second)
                         node = m.begin()->second.get();
                 }
+            } else if (isMongo) {
+                if (dbType == DatabaseType::MONGODB_OLD) {
+                    if (auto* mongoOldDb = dynamic_cast<MongoDBOldDatabase*>(db.get())) {
+                        for (const auto& entry : mongoOldDb->getDatabaseDataMap()) {
+                            if (entry.second) {
+                                node = entry.second.get();
+                                break;
+                            }
+                        }
+                    }
+                } else if (auto* mongoDb = dynamic_cast<MongoDBDatabase*>(db.get())) {
+                    for (const auto& entry : mongoDb->getDatabaseDataMap()) {
+                        if (entry.second) {
+                            node = entry.second.get();
+                            break;
+                        }
+                    }
+                }
             }
             if (node) {
-                app.getTabManager()->createSQLEditorTab("", node);
+                if (isMongo) {
+                    app.getTabManager()->createMongoEditorTab(node);
+                } else {
+                    app.getTabManager()->createSQLEditorTab("", node);
+                }
             } else {
-                spdlog::warn("New SQL Query: no loaded database node found for this connection");
+                spdlog::warn("New {}: no loaded database node found for this connection",
+                             isMongo ? "Query Editor" : "SQL Query");
             }
         }
         ImGui::PopStyleVar();
@@ -4161,7 +4221,9 @@ void DatabaseHierarchy::renderQueriesNode() {
     }
 
     if (queriesOpen) {
-        if (queries.empty()) {
+        const bool hasVisibleQueries = std::ranges::any_of(
+            queries, [&](const SqlScript& q) { return scriptMatchesConnectionType(q, isMongo); });
+        if (!hasVisibleQueries) {
             ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
             ImGui::Text("  No query");
             ImGui::PopStyleColor();
@@ -4170,26 +4232,36 @@ void DatabaseHierarchy::renderQueriesNode() {
                                                           ImGuiTreeNodeFlags_NoTreePushOnOpen |
                                                           ImGuiTreeNodeFlags_FramePadding;
             for (const auto& query : queries) {
+                if (!scriptMatchesConnectionType(query, isMongo))
+                    continue;
                 const std::string queryItemId =
-                    std::format("script_{}_{}", query.id, static_cast<const void*>(&query));
+                    std::format("script_conn_{}_id_{}", connId, query.id);
                 renderTreeNodeWithIcon(query.name, queryItemId, ICON_FA_FILE_CODE,
                                        ImGui::GetColorU32(colors.purple), queryItemFlags);
 
                 if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
                     IDatabaseNode* node = resolveNodeForQuery(query);
-                    app.getTabManager()->createSQLEditorTabFromQuery(node, query);
+                    if (node) {
+                        if (isMongo) {
+                            app.getTabManager()->createMongoEditorTabFromQuery(node, query);
+                        } else {
+                            app.getTabManager()->createSQLEditorTabFromQuery(node, query);
+                        }
+                    }
                 }
 
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("%s", query.filePath.c_str());
-                }
-
-                if (ImGui::BeginPopupContextItem(queryItemId.c_str())) {
+                if (ImGui::BeginPopupContextItem(nullptr)) {
                     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
                                         ImVec2(Theme::Spacing::M, Theme::Spacing::M));
                     if (ImGui::MenuItem("Open")) {
                         IDatabaseNode* node = resolveNodeForQuery(query);
-                        app.getTabManager()->createSQLEditorTabFromQuery(node, query);
+                        if (node) {
+                            if (isMongo) {
+                                app.getTabManager()->createMongoEditorTabFromQuery(node, query);
+                            } else {
+                                app.getTabManager()->createSQLEditorTabFromQuery(node, query);
+                            }
+                        }
                     }
                     ImGui::Separator();
                     if (ImGui::MenuItem("Delete")) {
@@ -4204,6 +4276,8 @@ void DatabaseHierarchy::renderQueriesNode() {
                     }
                     ImGui::PopStyleVar();
                     ImGui::EndPopup();
+                } else if (ImGui::IsItemHovered() && !query.filePath.empty()) {
+                    ImGui::SetTooltip("%s", query.filePath.c_str());
                 }
             }
         }

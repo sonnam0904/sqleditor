@@ -1,6 +1,8 @@
 #include "ui/tab_manager.hpp"
 #include "application.hpp"
 #include "database/database_node.hpp"
+#include "database/mongodb/mongodb_database_node.hpp"
+#include "database/mongodb_old/mongodb_old_database_node.hpp"
 #include "database/redis.hpp"
 #include "imgui.h"
 #include "ui/tab/csv_editor_tab.hpp"
@@ -419,15 +421,47 @@ std::shared_ptr<Tab> TabManager::createMongoEditorTab(IDatabaseNode* node) {
     if (!node)
         return nullptr;
 
-    const std::string baseName = "Query - " + node->getName();
-    std::string tabName = baseName;
+    std::string baseName = "Query";
+    if (auto* mongoNode = dynamic_cast<MongoDBDatabaseNode*>(node)) {
+        baseName += " - " + mongoNode->name;
+    } else if (auto* oldNode = dynamic_cast<MongoDBOldDatabaseNode*>(node)) {
+        baseName += " - " + oldNode->name;
+    } else if (auto* dbNode = node->ownerDatabase()) {
+        baseName += " - " + dbNode->getConnectionInfo().host;
+    } else {
+        baseName += " - " + node->getName();
+    }
+
     int count = 1;
+    std::string tabName = baseName;
     while (hasTabTitle(tabName)) {
-        ++count;
-        tabName = baseName + " (" + std::to_string(count) + ")";
+        tabName = baseName + " (" + std::to_string(++count) + ")";
     }
 
     auto tab = std::make_shared<MongoEditorTab>(tabName, node);
+    registerOpenedTab(tab);
+    return tab;
+}
+
+std::shared_ptr<Tab> TabManager::createMongoEditorTabFromQuery(IDatabaseNode* node,
+                                                             const SqlScript& script) {
+    for (auto& tab : tabs) {
+        if (tab->getType() == TabType::MONGO_EDITOR) {
+            const auto mongoTab = std::dynamic_pointer_cast<MongoEditorTab>(tab);
+            if (mongoTab && mongoTab->getScriptId() == script.id && script.id != 0) {
+                requestTabFocus(tab->getId());
+                return tab;
+            }
+            if (mongoTab && !mongoTab->getFilePath().empty() &&
+                mongoTab->getFilePath() == script.filePath) {
+                requestTabFocus(tab->getId());
+                return tab;
+            }
+        }
+    }
+
+    auto tab = std::make_shared<MongoEditorTab>(script.name, node);
+    tab->loadFromScript(script);
     registerOpenedTab(tab);
     return tab;
 }

@@ -58,6 +58,7 @@ public:
     std::shared_ptr<Tab> createDiagramTab(IDatabaseNode* node);
 
     std::shared_ptr<Tab> createMongoEditorTab(IDatabaseNode* node);
+    std::shared_ptr<Tab> createMongoEditorTabFromQuery(IDatabaseNode* node, const SqlScript& script);
 
     std::shared_ptr<Tab> createRedisCommandEditorTab(RedisDatabase* db);
     std::shared_ptr<Tab> createRedisKeyViewerTab(RedisDatabase* db, const std::string& pattern,

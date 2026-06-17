@@ -6,6 +6,7 @@
 #include "database/ddl_utils.hpp"
 #include "database/mongodb/mongo_bson_format.hpp"
 #include "database/mongodb/mongo_filter.hpp"
+#include "database/mongodb/mongo_shell.hpp"
 #include "database/mongodb/mongodb_database_node.hpp"
 #include "database/mongodb_old/mongodb_old_database_node.hpp"
 #include "database/sql_builder.hpp"
@@ -62,6 +63,158 @@ namespace {
         if (isNumericColumnType(col.type))
             return val;
         return "'" + ddl_utils::escapeSingleQuotes(val) + "'";
+    }
+
+    bool isObjectIdHex(const std::string_view s) {
+        if (s.size() != 24) {
+            return false;
+        }
+        return std::ranges::all_of(s, [](const char c) {
+            return std::isxdigit(static_cast<unsigned char>(c)) != 0;
+        });
+    }
+
+    std::string mongoTypeKey(const Column& col) {
+        std::string lower;
+        lower.reserve(col.type.size());
+        for (const char c : col.type) {
+            lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return lower;
+    }
+
+    std::string escapeMongoShellString(const std::string& val) {
+        std::string out;
+        out.reserve(val.size() + 4);
+        for (const char c : val) {
+            switch (c) {
+            case '\\':
+                out += "\\\\";
+                break;
+            case '"':
+                out += "\\\"";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            default:
+                out += c;
+                break;
+            }
+        }
+        return out;
+    }
+
+    std::string formatMongoFieldName(const std::string_view name) {
+        if (name.empty()) {
+            return "\"\"";
+        }
+        for (const char c : name) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '$') {
+                return std::format("\"{}\"", name);
+            }
+        }
+        return std::string(name);
+    }
+
+    std::string formatMongoShellValue(const Column& col, const std::string& val) {
+        if (isNullSentinel(val)) {
+            return "null";
+        }
+
+        const std::string type = mongoTypeKey(col);
+        if (type == "objectid" || (col.name == "_id" && isObjectIdHex(val))) {
+            return std::format("ObjectId(\"{}\")", val);
+        }
+
+        if (type == "bool" || type == "boolean") {
+            if (isBoolSentinel(val)) {
+                return boolSentinelValue(val) ? "true" : "false";
+            }
+            if (val == "true" || val == "false") {
+                return val;
+            }
+        }
+
+        if (type == "int32" || type == "int64" || type == "double" || type == "decimal128" ||
+            isNumericColumnType(col.type)) {
+            return val;
+        }
+
+        if (type == "date") {
+            std::string iso = val;
+            std::replace(iso.begin(), iso.end(), ' ', 'T');
+            if (iso.find('T') != std::string::npos && iso.back() != 'Z') {
+                iso += "Z";
+            }
+            return std::format("ISODate(\"{}\")", iso);
+        }
+
+        if (type == "document" || type == "array" ||
+            (!val.empty() && (val.front() == '{' || val.front() == '['))) {
+            return val;
+        }
+
+        return std::format("\"{}\"", escapeMongoShellString(val));
+    }
+
+    std::string buildMongoFilter(const Table& table, const std::vector<std::string>& rowValues) {
+        std::vector<std::string> pkColumns;
+        for (const auto& col : table.columns) {
+            if (col.isPrimaryKey) {
+                pkColumns.push_back(col.name);
+            }
+        }
+
+        std::vector<std::string> parts;
+        if (!pkColumns.empty()) {
+            for (const auto& pkCol : pkColumns) {
+                const auto colIt = std::ranges::find(table.columns, pkCol, &Column::name);
+                if (colIt == table.columns.end()) {
+                    continue;
+                }
+                const int colIdx =
+                    static_cast<int>(std::distance(table.columns.begin(), colIt));
+                if (colIdx < 0 || colIdx >= static_cast<int>(rowValues.size())) {
+                    continue;
+                }
+                parts.push_back(std::format("{}: {}", formatMongoFieldName(pkCol),
+                                            formatMongoShellValue(*colIt, rowValues[colIdx])));
+            }
+        } else {
+            for (int colIdx = 0; colIdx < static_cast<int>(table.columns.size()) &&
+                                 colIdx < static_cast<int>(rowValues.size());
+                 ++colIdx) {
+                parts.push_back(
+                    std::format("{}: {}", formatMongoFieldName(table.columns[colIdx].name),
+                                formatMongoShellValue(table.columns[colIdx], rowValues[colIdx])));
+            }
+        }
+
+        std::string filter = "{ ";
+        for (size_t i = 0; i < parts.size(); ++i) {
+            if (i > 0) {
+                filter += ", ";
+            }
+            filter += parts[i];
+        }
+        filter += " }";
+        return filter;
+    }
+
+    std::string mongoCollectionRef(const std::string& collectionName) {
+        for (const char c : collectionName) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+                return std::format("db[\"{}\"]", collectionName);
+            }
+        }
+        return std::format("db.{}", collectionName);
     }
 
     std::string sqlColumnTypeLabel(std::string type) {
@@ -837,6 +990,10 @@ bool TableViewerTab::hasPendingChanges() const {
 }
 
 std::vector<std::string> TableViewerTab::generateUpdateSQL() {
+    if (isMongoCollection()) {
+        return generateMongoShellCommands();
+    }
+
     std::vector<std::string> sqlStatements;
 
     const auto builder = createSQLBuilder(node_->getDatabaseType());
@@ -893,6 +1050,72 @@ std::vector<std::string> TableViewerTab::generateUpdateSQL() {
     return sqlStatements;
 }
 
+std::vector<std::string> TableViewerTab::generateMongoShellCommands() const {
+    std::vector<std::string> commands;
+    const std::string collRef = mongoCollectionRef(table_.name);
+
+    for (const auto& deleted : deletedRows) {
+        const std::string filter = buildMongoFilter(table_, deleted.values);
+        commands.push_back(std::format("{}.deleteOne({})", collRef, filter));
+    }
+
+    for (int rowIdx = 0; rowIdx < static_cast<int>(editedCells.size()); ++rowIdx) {
+        if (rowIdx < static_cast<int>(isNewRow.size()) && isNewRow[rowIdx]) {
+            std::vector<std::string> docParts;
+            docParts.reserve(table_.columns.size());
+            for (size_t colIdx = 0; colIdx < table_.columns.size(); ++colIdx) {
+                const auto& col = table_.columns[colIdx];
+                const std::string& val = tableData[rowIdx][colIdx];
+                if (col.name == "_id" && (val.empty() || isNullSentinel(val))) {
+                    continue;
+                }
+                docParts.push_back(std::format(
+                    "{}: {}", formatMongoFieldName(col.name), formatMongoShellValue(col, val)));
+            }
+            if (!docParts.empty()) {
+                std::string document = "{ ";
+                for (size_t i = 0; i < docParts.size(); ++i) {
+                    if (i > 0) {
+                        document += ", ";
+                    }
+                    document += docParts[i];
+                }
+                document += " }";
+                commands.push_back(std::format("{}.insertOne({})", collRef, document));
+            }
+            continue;
+        }
+
+        std::vector<std::string> setParts;
+        for (int colIdx = 0; colIdx < static_cast<int>(editedCells[rowIdx].size()); ++colIdx) {
+            if (!editedCells[rowIdx][colIdx]) {
+                continue;
+            }
+            const auto& col = table_.columns[colIdx];
+            setParts.push_back(std::format(
+                "{}: {}", formatMongoFieldName(col.name),
+                formatMongoShellValue(col, tableData[rowIdx][colIdx])));
+        }
+        if (setParts.empty()) {
+            continue;
+        }
+
+        std::string setClause;
+        for (size_t i = 0; i < setParts.size(); ++i) {
+            if (i > 0) {
+                setClause += ", ";
+            }
+            setClause += setParts[i];
+        }
+
+        const std::string filter = buildMongoFilter(table_, originalData[rowIdx]);
+        commands.push_back(
+            std::format("{}.updateOne({}, {{ $set: {{ {} }} }})", collRef, filter, setClause));
+    }
+
+    return commands;
+}
+
 void TableViewerTab::showSaveConfirmationDialog() {
     if (!showSaveDialog) {
         return;
@@ -910,7 +1133,13 @@ void TableViewerTab::showSaveConfirmationDialog() {
                 combined += "\n\n";
             combined += pendingUpdateSQL[i];
         }
-        saveDialogEditor_.SetLanguage(sqleditor::TextEditor::Language::SQL);
+        if (isMongoCollection()) {
+            combined = sqleditor::TextEditor::FormatMongoShell(combined);
+            saveDialogEditor_.SetLanguage(sqleditor::TextEditor::Language::MongoShell);
+        } else {
+            combined = sqleditor::TextEditor::FormatSQL(combined);
+            saveDialogEditor_.SetLanguage(sqleditor::TextEditor::Language::SQL);
+        }
         saveDialogEditor_.SetShowLineNumbers(true);
         saveDialogEditor_.SetReadOnly(false);
         saveDialogEditor_.SetText(combined);
@@ -934,7 +1163,9 @@ void TableViewerTab::showSaveConfirmationDialog() {
                                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
         // Header
         ImGui::PushStyleColor(ImGuiCol_Text, colors.subtext0);
-        ImGui::TextUnformatted("Review and edit the SQL before executing.");
+        ImGui::TextUnformatted(isMongoCollection() ? "Review and edit the MongoDB commands before "
+                                                     "executing."
+                                                   : "Review and edit the SQL before executing.");
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, Theme::Spacing::S));
 
@@ -979,17 +1210,36 @@ void TableViewerTab::showSaveConfirmationDialog() {
             ImGui::PushStyleColor(ImGuiCol_Text, colors.base);
             if (ImGui::Button(ICON_FA_PLAY " Execute")) {
                 const std::string editedSQL = saveDialogEditor_.GetText();
-                sqlExecutionOp.start([node = node_, editedSQL]() -> std::pair<bool, std::string> {
+                const bool isMongo = node_ && isMongoDbType(node_->getDatabaseType());
+                sqlExecutionOp.start([node = node_, editedSQL, isMongo]() -> std::pair<bool, std::string> {
                     if (!node) {
                         return {false, "Error: Database does not support query execution"};
                     }
-                    spdlog::debug("Executing SQL: {}", editedSQL);
-                    const auto result = node->executeQuery(editedSQL);
-                    if (!result.success()) {
-                        spdlog::error("SQL execution failed: {}", result.errorMessage());
-                        return {false, "Error: " + result.errorMessage()};
+
+                    const auto runOne = [&](const std::string& statement) -> std::pair<bool, std::string> {
+                        spdlog::debug("Executing query: {}", statement);
+                        const auto result = node->executeQuery(statement);
+                        if (!result.success()) {
+                            spdlog::error("Query execution failed: {}", result.errorMessage());
+                            return {false, "Error: " + result.errorMessage()};
+                        }
+                        return {true, {}};
+                    };
+
+                    if (isMongo) {
+                        const auto statements = splitMongoShellCommands(editedSQL);
+                        if (statements.empty()) {
+                            return {false, "Error: No MongoDB shell commands to execute"};
+                        }
+                        for (const auto& statement : statements) {
+                            if (auto outcome = runOne(statement); !outcome.first) {
+                                return outcome;
+                            }
+                        }
+                        return {true, {}};
                     }
-                    return {true, {}};
+
+                    return runOne(editedSQL);
                 });
             }
             ImGui::PopStyleColor(4);

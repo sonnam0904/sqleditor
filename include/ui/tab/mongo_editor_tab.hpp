@@ -1,10 +1,12 @@
 #pragma once
 
+#include "app_state.hpp"
 #include "database/async_helper.hpp"
 #include "database/db.hpp"
 #include "ui/tab/tab.hpp"
 #include "ui/text_editor.hpp"
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -25,7 +27,20 @@ public:
         return node_;
     }
 
+    void loadFromScript(const SqlScript& script);
+    [[nodiscard]] const std::string& getFilePath() const {
+        return filePath_;
+    }
+    [[nodiscard]] int getScriptId() const {
+        return scriptId_;
+    }
+    [[nodiscard]] bool hasUnsavedChanges() const override {
+        return contentModified_;
+    }
+
 private:
+    static constexpr const char* kScriptExtension = ".mongo";
+
     std::string query_;
     IDatabaseNode* node_ = nullptr;
     sqleditor::TextEditor editor_;
@@ -44,11 +59,25 @@ private:
     int pendingEditorFocusFrames_ = 3;
     MongoResultViewMode resultViewMode_ = MongoResultViewMode::Table;
 
+    // script file management
+    int scriptId_ = 0;
+    std::string filePath_;
+    std::string scriptName_;
+    bool contentModified_ = false;
+    bool renamingScript_ = false;
+    bool renamingFocusNeeded_ = false;
+    char renameBuffer_[256] = {};
+
     void startQueryExecutionAsync(const std::string& query);
     void checkQueryExecutionStatus();
     void cancelQueryExecution();
 
-    void renderHeader() const;
+    void renderConnectionInfo();
+    void renderDatabaseCombo(const std::string& host, const char* label, const std::string& currentName,
+                             const std::vector<std::string>& dbNames,
+                             const std::function<void(const std::string&)>& onSelect);
+    void switchNode(IDatabaseNode* newNode);
+    void renderScriptHeader();
     void renderToolbar();
     void renderQueryResults();
     void renderSingleResult(const StatementResult& r, size_t index);
@@ -60,6 +89,10 @@ private:
     void updateCompletionKeywords();
     bool completionKeywordsSet_ = false;
     size_t lastCompletionCollectionCount_ = 0;
+
+    static std::string getDefaultScriptsDir();
+    void saveScript();
+    void persistScriptToAppState();
 
     // AI panel
     std::unique_ptr<AIChatState> aiChatState_;
