@@ -1,3 +1,9 @@
+## [1.3.2](https://github.com/sonnam0904/sqleditor/compare/v1.3.1...v1.3.2) (2026-06-17)
+
+### Bug Fixes
+
+* enhance MongoDB functionality with new features and improvements ([4ce8501](https://github.com/sonnam0904/sqleditor/commit/4ce85018f1ea6aa8033e6968aa4ab60821c26326))
+
 ## [1.3.1](https://github.com/sonnam0904/sqleditor/compare/v1.3.0...v1.3.1) (2026-06-17)
 
 ### Bug Fixes
