@@ -1,3 +1,9 @@
+## [1.3.0](https://github.com/sonnam0904/sqleditor/compare/v1.2.1...v1.3.0) (2026-06-17)
+
+### Features
+
+* enhance MongoDB editor functionality and command parsing ([68b56fe](https://github.com/sonnam0904/sqleditor/commit/68b56fedee99ecef310de0872b78f5e9c20da15b))
+
 ## [1.2.1](https://github.com/sonnam0904/sqleditor/compare/v1.2.0...v1.2.1) (2026-06-16)
 
 ### Bug Fixes
