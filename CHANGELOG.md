@@ -1,3 +1,9 @@
+## [1.3.3](https://github.com/sonnam0904/sqleditor/compare/v1.3.2...v1.3.3) (2026-06-22)
+
+### Bug Fixes
+
+* implement database node deletion preparation and tab management ([8038b0c](https://github.com/sonnam0904/sqleditor/commit/8038b0c670e77fb96877d5616e9dbc6252ed781b))
+
 ## [1.3.2](https://github.com/sonnam0904/sqleditor/compare/v1.3.1...v1.3.2) (2026-06-17)
 
 ### Bug Fixes
