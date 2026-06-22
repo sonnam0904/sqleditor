@@ -27,6 +27,7 @@ public:
     void closeTab(std::uint64_t id);
     void closeAllTabs();
     void closeTabsForDatabase(DatabaseInterface* db);
+    void closeTabsForDatabaseNode(IDatabaseNode* node);
 
     // Tab queries
     [[nodiscard]] bool hasTabId(std::uint64_t id) const;

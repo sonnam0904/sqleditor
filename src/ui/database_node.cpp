@@ -179,6 +179,25 @@ void DatabaseHierarchy::setTableSearchFilter(const std::string_view filter) {
     tableSearchFilter_ = filter;
 }
 
+void DatabaseHierarchy::prepareDatabaseNodeDeletion(IDatabaseNode* dbData) {
+    if (!dbData) {
+        return;
+    }
+
+    Application::getInstance().getTabManager()->closeTabsForDatabaseNode(dbData);
+
+    std::unordered_set<const Table*> ownedTables;
+    for (const auto& table : dbData->getTables()) {
+        ownedTables.insert(&table);
+    }
+    for (const auto& view : dbData->getViews()) {
+        ownedTables.insert(&view);
+    }
+    std::erase_if(selectedTables_, [&](const Table* table) {
+        return ownedTables.contains(table);
+    });
+}
+
 bool DatabaseHierarchy::matchesTableSearch(const std::string_view name) const {
     if (tableSearchFilter_.empty()) {
         return true;
@@ -1010,7 +1029,8 @@ void DatabaseHierarchy::renderPostgresDatabaseNode(PostgresDatabaseNode* dbData)
                             dbName),
                 {{"Cancel", nullptr, AlertButton::Style::Cancel},
                  {"Delete",
-                  [this, dbName]() {
+                  [this, dbName, dbData]() {
+                      prepareDatabaseNodeDeletion(dbData);
                       auto [success, error] = db->dropDatabase(dbName);
                       if (success) {
                           spdlog::debug("Database '{}' deleted successfully", dbName);
@@ -1622,7 +1642,8 @@ void DatabaseHierarchy::renderMySQLDatabaseNode(MySQLDatabaseNode* dbData) {
                             dbName),
                 {{"Cancel", nullptr, AlertButton::Style::Cancel},
                  {"Delete",
-                  [this, dbName]() {
+                  [this, dbName, dbData]() {
+                      prepareDatabaseNodeDeletion(dbData);
                       auto [success, error] = db->dropDatabase(dbName);
                       if (success) {
                           spdlog::debug("Database '{}' deleted successfully", dbName);
@@ -2510,7 +2531,8 @@ void DatabaseHierarchy::renderMSSQLDatabaseNode(MSSQLDatabaseNode* dbData) {
                             dbName),
                 {{"Cancel", nullptr, AlertButton::Style::Cancel},
                  {"Delete",
-                  [this, dbName]() {
+                  [this, dbName, dbData]() {
+                      prepareDatabaseNodeDeletion(dbData);
                       auto [success, error] = db->dropDatabase(dbName);
                       if (success) {
                           spdlog::debug("Database '{}' deleted successfully", dbName);
@@ -3057,7 +3079,8 @@ void DatabaseHierarchy::renderOracleDatabaseNode(OracleDatabaseNode* dbData) {
                             dbName),
                 {{"Cancel", nullptr, AlertButton::Style::Cancel},
                  {"Delete",
-                  [this, dbName]() {
+                  [this, dbName, dbData]() {
+                      prepareDatabaseNodeDeletion(dbData);
                       auto [success, error] = db->dropDatabase(dbName);
                       if (success) {
                           spdlog::debug("Database '{}' deleted successfully", dbName);
@@ -3546,7 +3569,8 @@ void DatabaseHierarchy::renderMongoDBDatabaseNode(IDatabaseNode* dbData) {
                             dbName),
                 {{"Cancel", nullptr, AlertButton::Style::Cancel},
                  {"Delete",
-                  [this, dbName]() {
+                  [this, dbName, dbData]() {
+                      prepareDatabaseNodeDeletion(dbData);
                       auto [success, error] = db->dropDatabase(dbName);
                       if (success) {
                           spdlog::debug("Database '{}' deleted successfully", dbName);
@@ -4354,7 +4378,8 @@ void DatabaseHierarchy::renderCassandraDatabaseNode(CassandraDatabaseNode* dbDat
                         std::format("Permanently drop keyspace '{}' and ALL its data?", ksName),
                         {{"Cancel", nullptr, AlertButton::Style::Cancel},
                          {"Drop",
-                          [this, ksName]() {
+                          [this, ksName, dbData]() {
+                              prepareDatabaseNodeDeletion(dbData);
                               auto [ok, err] = db->dropDatabase(ksName);
                               if (ok) {
                                   if (auto* c = dynamic_cast<CassandraDatabase*>(db.get()))

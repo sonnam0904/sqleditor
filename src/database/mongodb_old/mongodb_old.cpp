@@ -521,6 +521,14 @@ QueryResult MongoDBOldDatabase::executeQueryForDatabase(const std::string& query
                 s.success = false;
                 s.errorMessage = error;
             } else {
+                if (auto it = databaseDataCache.find(effectiveDbName);
+                    it != databaseDataCache.end() && it->second) {
+                    it->second->collectionsLoader.cancel();
+                    for (auto& [_, loader] : it->second->collectionRefreshLoaders) {
+                        loader.cancel();
+                    }
+                    it->second->collectionRefreshLoaders.clear();
+                }
                 databaseDataCache.erase(effectiveDbName);
                 s.message = "Database dropped successfully";
                 (void)reply;
@@ -634,6 +642,14 @@ std::vector<std::string> MongoDBOldDatabase::getDatabaseNamesAsync() const {
 }
 
 std::pair<bool, std::string> MongoDBOldDatabase::dropDatabase(const std::string& dbName) {
+    if (auto it = databaseDataCache.find(dbName); it != databaseDataCache.end() && it->second) {
+        it->second->collectionsLoader.cancel();
+        for (auto& [_, loader] : it->second->collectionRefreshLoaders) {
+            loader.cancel();
+        }
+        it->second->collectionRefreshLoaders.clear();
+    }
+
     const auto query =
         std::format(R"({{"database": "{}", "command": "dropDatabase"}})", dbName);
     auto r = executeQuery(query);

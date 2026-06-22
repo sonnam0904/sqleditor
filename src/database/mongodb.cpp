@@ -652,6 +652,14 @@ std::pair<bool, std::string> MongoDBDatabase::dropDatabase(const std::string& db
     }
 
     try {
+        if (auto it = databaseDataCache.find(dbName); it != databaseDataCache.end() && it->second) {
+            it->second->collectionsLoader.cancel();
+            for (auto& [_, loader] : it->second->collectionRefreshLoaders) {
+                loader.cancel();
+            }
+            it->second->collectionRefreshLoaders.clear();
+        }
+
         auto client = getClient();
         (*client)[dbName].drop();
 

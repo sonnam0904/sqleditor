@@ -51,6 +51,49 @@ void TabManager::closeAllTabs() {
     pendingFocusTabId_ = 0;
 }
 
+namespace {
+
+    IDatabaseNode* databaseNodeFromTab(const Tab* tab) {
+        if (!tab) {
+            return nullptr;
+        }
+        if (const auto* t = dynamic_cast<const SQLEditorTab*>(tab)) {
+            return t->getDatabaseNode();
+        }
+        if (const auto* t = dynamic_cast<const TableViewerTab*>(tab)) {
+            return t->getDatabaseNode();
+        }
+        if (const auto* t = dynamic_cast<const TableEditorTab*>(tab)) {
+            return t->getDatabaseNode();
+        }
+        if (const auto* t = dynamic_cast<const DiagramTab*>(tab)) {
+            return t->getDatabaseNode();
+        }
+        if (const auto* t = dynamic_cast<const MongoEditorTab*>(tab)) {
+            return t->getDatabaseNode();
+        }
+        if (const auto* t = dynamic_cast<const PostgresSequenceViewerTab*>(tab)) {
+            return t->getDatabaseNode();
+        }
+        if (const auto* t = dynamic_cast<const RoutineViewerTab*>(tab)) {
+            return t->getDatabaseNode();
+        }
+        return nullptr;
+    }
+
+} // namespace
+
+void TabManager::closeTabsForDatabaseNode(IDatabaseNode* node) {
+    if (!node) {
+        return;
+    }
+
+    std::erase_if(tabs, [node](const std::shared_ptr<Tab>& tab) {
+        return databaseNodeFromTab(tab.get()) == node;
+    });
+    pruneTabState();
+}
+
 void TabManager::closeTabsForDatabase(DatabaseInterface* db) {
     if (!db)
         return;
@@ -59,22 +102,9 @@ void TabManager::closeTabsForDatabase(DatabaseInterface* db) {
     auto* sqliteDb = dynamic_cast<SQLiteDatabase*>(db);
 
     std::erase_if(tabs, [db, redisDb, sqliteDb](const std::shared_ptr<Tab>& tab) {
-        IDatabaseNode* node = nullptr;
-        if (auto* t = dynamic_cast<SQLEditorTab*>(tab.get()))
-            node = t->getDatabaseNode();
-        else if (auto* t = dynamic_cast<TableViewerTab*>(tab.get()))
-            node = t->getDatabaseNode();
-        else if (auto* t = dynamic_cast<TableEditorTab*>(tab.get()))
-            node = t->getDatabaseNode();
-        else if (auto* t = dynamic_cast<DiagramTab*>(tab.get()))
-            node = t->getDatabaseNode();
-        else if (auto* t = dynamic_cast<MongoEditorTab*>(tab.get()))
-            node = t->getDatabaseNode();
-        else if (auto* t = dynamic_cast<PostgresSequenceViewerTab*>(tab.get()))
-            node = t->getDatabaseNode();
-
-        if (node)
+        if (IDatabaseNode* node = databaseNodeFromTab(tab.get())) {
             return node->ownerDatabase() == db;
+        }
 
         if (sqliteDb) {
             if (auto* t = dynamic_cast<SQLiteSequenceViewerTab*>(tab.get()))

@@ -153,6 +153,8 @@ private:
     // Scripts associated with this connection
     void renderQueriesNode();
 
+    void prepareDatabaseNodeDeletion(IDatabaseNode* dbData);
+
     // Helper to resolve an IDatabaseNode from a SqlScript's metadata
     IDatabaseNode* resolveNodeForQuery(const SqlScript& script) const;
 
