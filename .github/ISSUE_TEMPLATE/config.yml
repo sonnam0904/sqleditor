@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/sonnam0904/sqleditor/security/advisories/new
+    about: Report security issues privately — do not use public issues.
+  - name: Questions & discussions
+    url: https://github.com/sonnam0904/sqleditor/discussions
+    about: Ask questions or share ideas before opening a feature request.
