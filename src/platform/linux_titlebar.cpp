@@ -225,9 +225,9 @@ void LinuxTitlebar::setup() {
     g_signal_connect(reportBugButton, "clicked", G_CALLBACK(+[](GtkButton*, gpointer userData) {
                          auto* self = static_cast<LinuxTitlebar*>(userData);
                          gtk_popover_popdown(GTK_POPOVER(self->menuPopover_));
-                         std::string url =
-                             "";
-                         GtkUriLauncher* launcher = gtk_uri_launcher_new(url.c_str());
+                         constexpr const char* kIssuesUrl =
+                             "https://github.com/sonnam0904/sqleditor/issues";
+                         GtkUriLauncher* launcher = gtk_uri_launcher_new(kIssuesUrl);
                          gtk_uri_launcher_launch(launcher, GTK_WINDOW(self->parentWindow_), nullptr,
                                                  nullptr, nullptr);
                          g_object_unref(launcher);

@@ -236,6 +236,7 @@ set(APP_SOURCES
     src/ai/ai_chat.cpp
     src/ui/ai_chat_panel.cpp
     src/ui/ai_settings_dialog.cpp
+    src/ui/update_dialog.cpp
     src/license/license_manager.cpp
 )
 

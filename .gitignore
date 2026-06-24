@@ -56,3 +56,5 @@ WixToolset.*.dll
 *.wixobj
 
 SECRETS
+
+.codebase-memory

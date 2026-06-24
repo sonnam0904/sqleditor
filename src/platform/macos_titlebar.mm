@@ -981,6 +981,8 @@ static void attachDialogToMainWindow(NSWindow* dialog, NSWindow* mainWindow) {
 
 - (void)reportBugClicked:(id)sender {
     [self.menuPopover close];
+    NSURL* url = [NSURL URLWithString:@"https://github.com/sonnam0904/sqleditor/issues"];
+    [[NSWorkspace sharedWorkspace] openURL:url];
 }
 
 - (void)checkForUpdatesClicked:(id)sender {
