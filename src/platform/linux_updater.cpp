@@ -98,8 +98,15 @@ bool isNewerVersion(const std::string& current, const std::string& latest) {
     return false;
 }
 
+std::string httpErrorMessage(const httplib::Result& res, const char* context) {
+    if (res) {
+        return std::string(context) + " (HTTP " + std::to_string(res->status) + ")";
+    }
+    return std::string(context) + " (" + httplib::to_string(res.error()) + ")";
+}
+
 std::optional<ReleaseInfo> fetchLatestRelease() {
-    httplib::Client cli(kGitHubHost);
+    httplib::Client cli("https://" + std::string(kGitHubHost));
     cli.set_connection_timeout(15);
     cli.set_read_timeout(60);
     cli.set_follow_location(true);
@@ -107,8 +114,7 @@ std::optional<ReleaseInfo> fetchLatestRelease() {
 
     const auto res = cli.Get(kVersionJsonPath);
     if (!res || res->status != 200) {
-        const std::string status = res ? std::to_string(res->status) : "no response";
-        throw std::runtime_error("Failed to fetch release metadata (HTTP " + status + ")");
+        throw std::runtime_error(httpErrorMessage(res, "Failed to fetch release metadata"));
     }
 
     const json payload = json::parse(res->body);
@@ -196,10 +202,11 @@ std::optional<std::string> downloadRelease(const ReleaseInfo& release) {
     const std::string path = release.downloadUrl.substr(pathPos);
 
     httplib::Client cli(baseUrl.c_str());
-    cli.set_connection_timeout(15);
-    cli.set_read_timeout(0);
+    cli.set_connection_timeout(30);
+    cli.set_read_timeout(3600);
+    cli.set_write_timeout(300);
     cli.set_follow_location(true);
-    cli.set_default_headers({{"User-Agent", kUserAgent}});
+    cli.set_default_headers({{"User-Agent", kUserAgent}, {"Accept", "*/*"}});
 
     std::ofstream out(target, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -219,8 +226,7 @@ std::optional<std::string> downloadRelease(const ReleaseInfo& release) {
 
     if (!res || res->status != 200 || writeFailed) {
         fs::remove(target, ec);
-        const std::string status = res ? std::to_string(res->status) : "no response";
-        throw std::runtime_error("Download failed (HTTP " + status + ")");
+        throw std::runtime_error(httpErrorMessage(res, "Download failed"));
     }
 
     const std::string actualHash = sha256HexFile(target);
