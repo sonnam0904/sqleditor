@@ -1,3 +1,9 @@
+## [1.4.2](https://github.com/sonnam0904/sqleditor/compare/v1.4.1...v1.4.2) (2026-06-24)
+
+### Bug Fixes
+
+* error HTTP no response ([b1b7efb](https://github.com/sonnam0904/sqleditor/commit/b1b7efb6f03ae34562ebd8d86e5f24fdc5c43da1))
+
 ## [1.4.1](https://github.com/sonnam0904/sqleditor/compare/v1.4.0...v1.4.1) (2026-06-24)
 
 ### Bug Fixes
