@@ -1,3 +1,9 @@
+## [1.4.0](https://github.com/sonnam0904/sqleditor/compare/v1.3.3...v1.4.0) (2026-06-24)
+
+### Features
+
+* implement update functionality and improve UI interactions ([ec69913](https://github.com/sonnam0904/sqleditor/commit/ec69913f21a5b073c79d6740f1ae488b7078a791))
+
 ## [1.3.3](https://github.com/sonnam0904/sqleditor/compare/v1.3.2...v1.3.3) (2026-06-22)
 
 ### Bug Fixes
