@@ -1,3 +1,9 @@
+## [1.4.1](https://github.com/sonnam0904/sqleditor/compare/v1.4.0...v1.4.1) (2026-06-24)
+
+### Bug Fixes
+
+* rollback style ([cf6143d](https://github.com/sonnam0904/sqleditor/commit/cf6143dfee8ba2e6269fba0dcff8be1d6e8cf368))
+
 ## [1.4.0](https://github.com/sonnam0904/sqleditor/compare/v1.3.3...v1.4.0) (2026-06-24)
 
 ### Features
