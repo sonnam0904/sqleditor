@@ -399,6 +399,15 @@ MongoDBDatabaseNode::getCollectionDocumentsAsJson(const Table& collection, const
 }
 
 std::vector<std::string> MongoDBDatabaseNode::getColumnNames(const Table& collection) {
+    if (!collection.columns.empty()) {
+        std::vector<std::string> names;
+        names.reserve(collection.columns.size());
+        for (const auto& col : collection.columns) {
+            names.push_back(col.name);
+        }
+        return names;
+    }
+
     const std::string& collectionName = collection.name;
     // Find the collection in our loaded collections to get inferred schema
     const auto it = std::ranges::find_if(

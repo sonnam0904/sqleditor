@@ -40,6 +40,8 @@ public:
     void previousPage();
     void firstPage();
     void lastPage();
+    void updateTableMetadata(const Table& table);
+    void syncTableMetadataFromNode();
     void refreshData();
     void saveChanges();
     void cancelChanges();

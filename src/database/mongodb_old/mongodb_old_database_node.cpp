@@ -254,6 +254,15 @@ MongoDBOldDatabaseNode::getCollectionDocumentsAsJson(const Table& collection, co
 }
 
 std::vector<std::string> MongoDBOldDatabaseNode::getColumnNames(const Table& collection) {
+    if (!collection.columns.empty()) {
+        std::vector<std::string> names;
+        names.reserve(collection.columns.size());
+        for (const auto& col : collection.columns) {
+            names.push_back(col.name);
+        }
+        return names;
+    }
+
     const auto it = std::ranges::find_if(collections, [&collection](const Table& t) {
         return t.name == collection.name;
     });

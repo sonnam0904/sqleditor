@@ -328,7 +328,13 @@ void TableViewerTab::render() {
         } else if (isMongoCollection() && mongoViewMode_ == MongoCollectionViewMode::Json &&
                    !mongoDocumentJson_.empty()) {
             renderMongoJsonView(tableAreaWidth, availableHeight);
-        } else if (!table_.columns.empty() && !tableData.empty()) {
+        } else if (!tableData.empty()) {
+            if (table_.columns.empty()) {
+                syncTableMetadataFromNode();
+            }
+        }
+
+        if (!tableData.empty() && !table_.columns.empty()) {
             // Update table renderer with current data
             tableRenderer->setColumns(table_.columns);
             tableRenderer->setData(tableData);
@@ -732,6 +738,49 @@ void TableViewerTab::lastPage() {
     loadDataAsync();
 }
 
+void TableViewerTab::updateTableMetadata(const Table& table) {
+    if (table.name != table_.name) {
+        return;
+    }
+
+    table_.columns = table.columns;
+    table_.indexes = table.indexes;
+    table_.foreignKeys = table.foreignKeys;
+    table_.incomingForeignKeys = table.incomingForeignKeys;
+    table_.schema = table.schema;
+    table_.fullName = table.fullName;
+
+    initializeFilterAutoComplete();
+    if (tableRenderer) {
+        tableRenderer->setColumns(table_.columns);
+    }
+}
+
+void TableViewerTab::syncTableMetadataFromNode() {
+    if (!node_) {
+        return;
+    }
+
+    const auto* provider = dynamic_cast<ITableDataProvider*>(node_);
+    if (!provider) {
+        return;
+    }
+
+    const auto syncFrom = [this](const std::vector<Table>& tables) -> bool {
+        for (const auto& table : tables) {
+            if (table.name == table_.name) {
+                updateTableMetadata(table);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (syncFrom(provider->getTables()) || syncFrom(provider->getViews())) {
+        return;
+    }
+}
+
 void TableViewerTab::refreshData() {
     if (!dataLoadOp.isRunning()) {
         // Reset selection state
@@ -747,6 +796,7 @@ void TableViewerTab::refreshData() {
             std::fill(row.begin(), row.end(), false);
         }
 
+        syncTableMetadataFromNode();
         loadDataAsync();
     }
 }
@@ -955,6 +1005,23 @@ void TableViewerTab::loadDataAsync() {
 
 void TableViewerTab::checkAsyncLoadStatus() {
     dataLoadOp.check([this](bool) {
+        syncTableMetadataFromNode();
+
+        if (table_.columns.empty() && isMongoCollection()) {
+            if (auto* provider = dynamic_cast<ITableDataProvider*>(node_)) {
+                for (const auto& name : provider->getColumnNames(table_)) {
+                    Column col;
+                    col.name = name;
+                    col.type = name == "_id" ? "objectId" : "string";
+                    if (name == "_id") {
+                        col.isPrimaryKey = true;
+                        col.isNotNull = true;
+                    }
+                    table_.columns.push_back(col);
+                }
+            }
+        }
+
         // Auto-select first cell on initial load
         if (!initialSelectionDone && !tableData.empty() && !table_.columns.empty()) {
             selectedRow = 0;

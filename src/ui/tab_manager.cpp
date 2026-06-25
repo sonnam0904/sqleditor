@@ -259,6 +259,8 @@ std::shared_ptr<Tab> TabManager::createTableViewerTab(IDatabaseNode* node, const
             const auto tableTab = std::dynamic_pointer_cast<TableViewerTab>(tab);
             if (tableTab && tableTab->getDatabaseNode() == node &&
                 tableTab->getDatabasePath() == tableFullName) {
+                tableTab->updateTableMetadata(table);
+                tableTab->refreshData();
                 requestTabFocus(tab->getId());
                 std::cout << "Table " << table.name << " is already open, focusing existing tab"
                           << std::endl;
