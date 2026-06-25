@@ -1,3 +1,9 @@
+## [1.4.3](https://github.com/sonnam0904/sqleditor/compare/v1.4.2...v1.4.3) (2026-06-25)
+
+### Bug Fixes
+
+* Modified SQL query in `PostgresSchemaNode` to determine primary key status using a more reliable method. ([6a44ff3](https://github.com/sonnam0904/sqleditor/commit/6a44ff301bbe4210a53ff6701a741c688357680c))
+
 ## [1.4.2](https://github.com/sonnam0904/sqleditor/compare/v1.4.1...v1.4.2) (2026-06-24)
 
 ### Bug Fixes
